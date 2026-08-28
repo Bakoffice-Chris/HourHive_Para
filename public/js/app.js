@@ -10,7 +10,12 @@ let state = {
   students: [],
   assignments: [],
   scheduleWeek: null,
+  runningTimers: {}, // key `${para_id}:${student_id}` -> log row
+  weeklyActual: {}, // key `${para_id}:${student_id}` -> minutes
+  timerTickHandle: null,
 };
+
+function timerKey(paraId, studentId) { return `${paraId}:${studentId}`; }
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -106,6 +111,7 @@ function setView(view) {
     students: 'Students',
     caseloads: 'Caseloads',
     schedule: 'Schedule',
+    admin: 'Admin Report',
   };
   document.getElementById('viewTitle').textContent = titles[view];
   render();
@@ -113,18 +119,39 @@ function setView(view) {
 
 async function loadAll() {
   try {
-    const [paras, students, assignments] = await Promise.all([
+    const [paras, students, assignments, running, weekly] = await Promise.all([
       api('/paras'),
       api('/students'),
       api('/assignments'),
+      api('/time-logs/running'),
+      api('/time-logs/weekly-summary'),
     ]);
     state.paras = paras;
     state.students = students;
     state.assignments = assignments;
+    state.runningTimers = {};
+    running.forEach((r) => (state.runningTimers[timerKey(r.para_id, r.student_id)] = r));
+    state.weeklyActual = {};
+    weekly.summary.forEach((s) => (state.weeklyActual[timerKey(s.para_id, s.student_id)] = s.actual_minutes));
+    startTimerTicker();
     render();
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+function startTimerTicker() {
+  if (state.timerTickHandle) return;
+  state.timerTickHandle = setInterval(() => {
+    document.querySelectorAll('.timer-elapsed[data-start]').forEach((el) => {
+      const startedAt = new Date(el.dataset.start).getTime();
+      const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      const h = String(Math.floor(elapsedSec / 3600)).padStart(2, '0');
+      const m = String(Math.floor((elapsedSec % 3600) / 60)).padStart(2, '0');
+      const s = String(elapsedSec % 60).padStart(2, '0');
+      el.textContent = `${h}:${m}:${s}`;
+    });
+  }, 1000);
 }
 
 function render() {
@@ -138,6 +165,7 @@ function render() {
   if (state.view === 'students') renderStudents(content, actions);
   if (state.view === 'caseloads') renderCaseloads(content, actions);
   if (state.view === 'schedule') renderSchedule(content, actions);
+  if (state.view === 'admin') renderAdmin(content, actions);
 }
 
 // ---------- Dashboard ----------
@@ -349,8 +377,12 @@ function openAvailabilityModal(para) {
 
 // ---------- Students ----------
 function renderStudents(content, actions) {
-  actions.innerHTML = `<button class="btn btn-amber" id="addStudentBtn">+ Add Student</button>`;
+  actions.innerHTML = `
+    <button class="btn btn-outline" id="importStudentsBtn">Import CSV</button>
+    <button class="btn btn-amber" id="addStudentBtn">+ Add Student</button>
+  `;
   document.getElementById('addStudentBtn').onclick = () => openStudentModal();
+  document.getElementById('importStudentsBtn').onclick = () => openImportModal();
 
   if (state.students.length === 0) {
     content.innerHTML = emptyState('No students yet', 'Add students to begin assigning caseloads.');
@@ -370,6 +402,7 @@ function renderStudents(content, actions) {
               <td>${s.grade || '—'}</td>
               <td style="color:var(--ink-soft)">${s.iep_notes || ''}</td>
               <td class="table-actions">
+                <button class="btn btn-outline btn-sm" data-notes="${s.id}">Case Notes</button>
                 <button class="btn btn-outline btn-sm" data-edit="${s.id}">Edit</button>
                 <button class="btn-danger-text" data-del="${s.id}">Remove</button>
               </td>
@@ -381,6 +414,7 @@ function renderStudents(content, actions) {
     </div>
   `;
   content.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openStudentModal(findStudent(b.dataset.edit))));
+  content.querySelectorAll('[data-notes]').forEach((b) => (b.onclick = () => openNotesModal(findStudent(b.dataset.notes))));
   content.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deleteStudent(b.dataset.del)));
 }
 
@@ -433,6 +467,175 @@ function openStudentModal(student) {
   };
 }
 
+function openImportModal() {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal">
+      <h3>Import Students from CSV</h3>
+      <p class="field-hint" style="margin-bottom:14px;">
+        First row must be a header with at least a <strong>Name</strong> column. <strong>Grade</strong> and
+        <strong>Notes</strong> columns are optional and picked up automatically if present.
+        Students already on your roster (matched by name) are skipped, not duplicated.
+      </p>
+      <p class="field-hint" style="margin-bottom:16px;">
+        <a href="/api/students/import/template" id="templateLink" style="color:var(--amber-deep);font-weight:700;">Download a template CSV</a>
+      </p>
+      <div class="form-row">
+        <label>CSV file</label>
+        <input type="file" id="csvFile" accept=".csv,text/csv" />
+      </div>
+      <div id="importResult"></div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="cancelBtn">Cancel</button>
+        <button class="btn btn-amber" id="importBtn">Import</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  // The template download needs the auth token, so fetch it as a blob rather than a plain link nav.
+  backdrop.querySelector('#templateLink').onclick = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await fetch(API + '/students/import/template', {
+        headers: { Authorization: 'Bearer ' + state.token },
+      });
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'students-template.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast('Could not download template', true);
+    }
+  };
+
+  backdrop.querySelector('#cancelBtn').onclick = () => backdrop.remove();
+  backdrop.querySelector('#importBtn').onclick = async () => {
+    const fileInput = backdrop.querySelector('#csvFile');
+    const resultEl = backdrop.querySelector('#importResult');
+    const file = fileInput.files[0];
+    if (!file) return toast('Choose a CSV file first', true);
+
+    const importBtn = backdrop.querySelector('#importBtn');
+    importBtn.disabled = true;
+    importBtn.textContent = 'Importing…';
+    resultEl.innerHTML = '';
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch(API + '/students/import', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + state.token },
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Import failed');
+
+      resultEl.innerHTML = `
+        <div class="card" style="background:var(--paper-2);box-shadow:none;margin-top:4px;margin-bottom:0;">
+          <div style="font-weight:700;color:var(--navy);margin-bottom:6px;">
+            Imported ${data.imported} of ${data.total_rows} row${data.total_rows === 1 ? '' : 's'}
+          </div>
+          <div style="font-size:12.5px;color:var(--ink-soft);">
+            ${data.skipped_duplicates ? `${data.skipped_duplicates} skipped (already on roster). ` : ''}
+            ${data.skipped_blank ? `${data.skipped_blank} skipped (blank name). ` : ''}
+            ${!data.skipped_duplicates && !data.skipped_blank ? 'No rows were skipped.' : ''}
+          </div>
+        </div>
+      `;
+      toast(`${data.imported} student${data.imported === 1 ? '' : 's'} imported`);
+      await loadAll();
+      setView('students');
+      // Leave the result summary visible for a moment rather than closing immediately.
+      setTimeout(() => backdrop.remove(), 1800);
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      importBtn.disabled = false;
+      importBtn.textContent = 'Import';
+    }
+  };
+}
+
+function openNotesModal(student) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal" style="width:520px;">
+      <h3>${student.name} — Case Notes</h3>
+      <div class="form-row">
+        <textarea id="newNote" rows="3" placeholder="Add a dated note — progress, incidents, parent contact, anything worth logging..."></textarea>
+      </div>
+      <div class="modal-actions" style="margin-top:0;margin-bottom:18px;">
+        <button class="btn btn-amber" id="addNoteBtn">Add note</button>
+      </div>
+      <div id="notesList" style="max-height:320px;overflow-y:auto;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="closeBtn">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('#closeBtn').onclick = () => backdrop.remove();
+
+  async function loadNotes() {
+    const listEl = backdrop.querySelector('#notesList');
+    listEl.innerHTML = '<p style="color:var(--ink-soft);font-size:13px;">Loading…</p>';
+    try {
+      const notes = await api(`/students/${student.id}/notes`);
+      if (notes.length === 0) {
+        listEl.innerHTML = '<p style="color:var(--ink-soft);font-size:13px;">No case notes yet.</p>';
+        return;
+      }
+      listEl.innerHTML = notes
+        .map(
+          (n) => `
+        <div style="border-bottom:1px solid var(--paper-2);padding:10px 0;">
+          <div style="font-size:11.5px;color:var(--ink-soft);margin-bottom:4px;display:flex;justify-content:space-between;">
+            <span>${n.author ? n.author + ' · ' : ''}${new Date(n.created_at.replace(' ', 'T') + 'Z').toLocaleString()}</span>
+            <button class="btn-danger-text" data-del-note="${n.id}" style="font-size:11px;">Delete</button>
+          </div>
+          <div style="font-size:13.5px;color:var(--ink);white-space:pre-wrap;">${n.note}</div>
+        </div>`
+        )
+        .join('');
+      listEl.querySelectorAll('[data-del-note]').forEach(
+        (b) =>
+          (b.onclick = async () => {
+            if (!confirm('Delete this note?')) return;
+            try {
+              await api(`/students/${student.id}/notes/${b.dataset.delNote}`, { method: 'DELETE' });
+              loadNotes();
+            } catch (e) {
+              toast(e.message, true);
+            }
+          })
+      );
+    } catch (e) {
+      listEl.innerHTML = `<p style="color:var(--danger);font-size:13px;">${e.message}</p>`;
+    }
+  }
+
+  backdrop.querySelector('#addNoteBtn').onclick = async () => {
+    const textEl = backdrop.querySelector('#newNote');
+    const note = textEl.value.trim();
+    if (!note) return toast('Write something first', true);
+    try {
+      await api(`/students/${student.id}/notes`, { method: 'POST', body: JSON.stringify({ note }) });
+      textEl.value = '';
+      toast('Note added');
+      loadNotes();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+
+  loadNotes();
+}
+
 // ---------- Caseloads ----------
 function renderCaseloads(content, actions) {
   actions.innerHTML = `<button class="btn btn-amber" id="addAssignBtn">+ Assign Student</button>`;
@@ -461,22 +664,38 @@ function renderCaseloads(content, actions) {
       <div class="card">
         <h3>${list[0].para_name} <span style="color:var(--ink-soft);font-weight:500;font-size:13px;">— ${total} min/week caseload total</span></h3>
         <table>
-          <thead><tr><th>Student</th><th>Weekly Minutes</th><th>Session Length</th><th>Type</th><th></th></tr></thead>
+          <thead><tr><th>Student</th><th>Weekly Minutes</th><th>Session Length</th><th>Type</th><th>Live Clock</th><th></th></tr></thead>
           <tbody>
             ${list
-              .map(
-                (a) => `
+              .map((a) => {
+                const key = timerKey(a.para_id, a.student_id);
+                const running = state.runningTimers[key];
+                const actual = state.weeklyActual[key] || 0;
+                const pct = Math.min(100, Math.round((actual / a.weekly_minutes) * 100));
+                const timerCell = running
+                  ? `<div style="display:flex;align-items:center;gap:8px;">
+                       <span class="timer-elapsed mono" data-start="${running.start_at}" style="font-weight:700;color:var(--success);">00:00:00</span>
+                       <button class="btn btn-sm" style="background:var(--danger-bg);color:var(--danger);border-color:transparent;" data-stop="${running.id}">Stop</button>
+                     </div>`
+                  : `<button class="btn btn-outline btn-sm" data-start-para="${a.para_id}" data-start-student="${a.student_id}">▶ Start</button>`;
+                return `
               <tr>
                 <td>${a.student_name}</td>
                 <td class="mono">${a.weekly_minutes} min</td>
                 <td class="mono">${a.session_length} min (min ${a.min_session_length})</td>
                 <td>${a.service_type === 'group' ? `<span class="badge badge-group">Group · ${a.group_tag}</span>` : '<span class="badge badge-11">1:1</span>'}</td>
+                <td>
+                  ${timerCell}
+                  <div style="font-size:11px;color:var(--ink-soft);margin-top:5px;">
+                    <span class="mono" style="color:${pct >= 100 ? 'var(--success)' : 'var(--ink-soft)'};font-weight:700;">${actual}</span> / ${a.weekly_minutes} min this week
+                  </div>
+                </td>
                 <td class="table-actions">
                   <button class="btn btn-outline btn-sm" data-edit="${a.id}">Edit</button>
                   <button class="btn-danger-text" data-del="${a.id}">Remove</button>
                 </td>
-              </tr>`
-              )
+              </tr>`;
+              })
               .join('')}
           </tbody>
         </table>
@@ -488,6 +707,35 @@ function renderCaseloads(content, actions) {
     (b) => (b.onclick = () => openAssignmentModal(state.assignments.find((a) => String(a.id) === b.dataset.edit)))
   );
   content.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deleteAssignment(b.dataset.del)));
+  content.querySelectorAll('[data-start-para]').forEach(
+    (b) => (b.onclick = () => startClock(Number(b.dataset.startPara), Number(b.dataset.startStudent)))
+  );
+  content.querySelectorAll('[data-stop]').forEach((b) => (b.onclick = () => stopClock(b.dataset.stop)));
+}
+
+async function startClock(paraId, studentId) {
+  try {
+    await api('/time-logs/start', { method: 'POST', body: JSON.stringify({ para_id: paraId, student_id: studentId }) });
+    toast('Clock started');
+    await loadAll();
+    setView('caseloads');
+  } catch (e) {
+    toast(e.message, true);
+    // A 409 (already running elsewhere/stale state) still warrants a refresh to resync.
+    await loadAll();
+    setView('caseloads');
+  }
+}
+
+async function stopClock(logId) {
+  try {
+    const result = await api(`/time-logs/${logId}/stop`, { method: 'POST' });
+    toast(`Clock stopped — ${result.log.minutes} min logged`);
+    await loadAll();
+    setView('caseloads');
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 async function deleteAssignment(id) {
@@ -715,6 +963,88 @@ function renderScheduleBody(body, data) {
   </div>`;
 
   body.innerHTML = html;
+}
+
+// ---------- Admin Report ----------
+function addDaysISO(dateStr, days) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function formatWeekLabel(mondayStr) {
+  const start = new Date(mondayStr + 'T00:00:00Z');
+  const end = new Date(addDaysISO(mondayStr, 4) + 'T00:00:00Z');
+  const opts = { month: 'short', day: 'numeric', timeZone: 'UTC' };
+  return `${start.toLocaleDateString('en-US', opts)} \u2013 ${end.toLocaleDateString('en-US', opts)}`;
+}
+
+async function renderAdmin(content, actions) {
+  actions.innerHTML = '';
+  content.innerHTML = `<p class="section-intro">Actual clocked minutes vs. weekly targets, for this week and last week, pulled from the Caseloads live clock.</p>
+    <div id="adminCurrentWeek"></div>
+    <div id="adminPriorWeek"></div>`;
+
+  const currentMonday = nextMonday();
+  const priorMonday = addDaysISO(currentMonday, -7);
+
+  try {
+    const [current, prior] = await Promise.all([
+      api(`/time-logs/admin-summary?week_start_date=${currentMonday}`),
+      api(`/time-logs/admin-summary?week_start_date=${priorMonday}`),
+    ]);
+    document.getElementById('adminCurrentWeek').innerHTML = renderAdminTable(
+      `This Week \u2014 ${formatWeekLabel(current.week_start_date)}`,
+      current.rows
+    );
+    document.getElementById('adminPriorWeek').innerHTML = renderAdminTable(
+      `Last Week \u2014 ${formatWeekLabel(prior.week_start_date)}`,
+      prior.rows
+    );
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function renderAdminTable(title, rows) {
+  if (!rows || rows.length === 0) {
+    return `<div class="card"><h3>${title}</h3><p style="color:var(--ink-soft);font-size:13px;">No caseload assignments yet.</p></div>`;
+  }
+  const sorted = [...rows].sort((a, b) => a.student_name.localeCompare(b.student_name));
+  return `
+    <div class="card">
+      <h3>${title}</h3>
+      <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th><th>Grade</th><th>% of Weekly Goal</th><th>Total Weekly Minutes</th><th>Target Weekly Minutes</th>
+            <th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${sorted
+            .map((r) => {
+              const pctClass = r.pct_of_goal >= 100 ? 'badge-met' : r.pct_of_goal > 0 ? 'badge-partial' : 'badge-unmet';
+              return `
+              <tr>
+                <td><strong>${r.student_name}</strong><div style="font-size:11px;color:var(--ink-soft);">${r.para_name}</div></td>
+                <td>${r.grade || '\u2014'}</td>
+                <td><span class="badge ${pctClass}">${r.pct_of_goal}%</span></td>
+                <td class="mono">${r.actual_minutes} min</td>
+                <td class="mono">${r.target_minutes} min</td>
+                <td style="font-size:11.5px;color:var(--ink-soft);white-space:nowrap;">${r.days.mon || '\u2014'}</td>
+                <td style="font-size:11.5px;color:var(--ink-soft);white-space:nowrap;">${r.days.tue || '\u2014'}</td>
+                <td style="font-size:11.5px;color:var(--ink-soft);white-space:nowrap;">${r.days.wed || '\u2014'}</td>
+                <td style="font-size:11.5px;color:var(--ink-soft);white-space:nowrap;">${r.days.thu || '\u2014'}</td>
+                <td style="font-size:11.5px;color:var(--ink-soft);white-space:nowrap;">${r.days.fri || '\u2014'}</td>
+              </tr>`;
+            })
+            .join('')}
+        </tbody>
+      </table>
+      </div>
+    </div>`;
 }
 
 function emptyState(title, sub) {

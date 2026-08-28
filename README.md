@@ -5,16 +5,19 @@ A sibling product to HourHive, built for special education / related-services sc
 ## What it does
 
 1. **Para Instructors** — add each Para, then set their weekly work hours plus break and lunch windows (per day, Mon–Fri by default).
-2. **Students** — add students with grade and optional notes.
+2. **Students** — add students one at a time, or click **Import CSV** to upload a roster in bulk. The first row must be a header with at least a `Name` column; `Grade` and `Notes` columns are picked up automatically if present (also matches `Student Name`, `Grade Level`, `IEP Notes`, etc.). A "Download a template CSV" link is in the import dialog. Students already on the roster (matched by name, case-insensitive) are skipped rather than duplicated.
 3. **Caseloads** — assign students to a Para with:
    - Required **weekly service minutes**
    - Preferred and minimum **session length**
    - **1:1** or **group** service type (group students sharing a `group_tag` under the same Para get co-scheduled in the same time block — e.g. a 2-student social skills group)
    - **Priority** (1 highest–5 lowest) as a scheduler tie-breaker
-4. **Schedule** — click "Generate schedule" for a given week. The engine:
+   - A **live Start/Stop clock** right on the caseload row. Click Start when a session actually begins, Stop when it ends — it logs the real elapsed time and rolls it into that student's actual minutes for the current week, shown next to the target (e.g. `40 / 120 min this week`). This is real delivered time, separate from the projected schedule below, so it's the number you'd actually want for a compliance audit. A manual-entry endpoint (`POST /api/time-logs/manual`) also exists for logging a session after the fact if the clock wasn't running.
+4. **Student case notes** — each student row has a **Case Notes** button opening a running, timestamped log (author + date + note), separate from the short descriptive `Notes` field on the student's basic info. Good for session progress notes, incidents, parent contact, etc. without overwriting the student's summary field.
+5. **Schedule** — click "Generate schedule" for a given week. The engine:
    - Computes each Para's open time (work hours minus break/lunch)
    - Greedily fills that open time with student sessions, respecting session length preferences, spreading sessions across days rather than stacking one student back-to-back, and honoring group vs. 1:1
    - Flags any student who couldn't be fully scheduled (not enough Para hours for the caseload) as **partial** or **unmet**, so you can see compliance risk immediately instead of finding out at review time
+6. **Admin Report** — a read-only rollup table for whole-team compliance review: Name, Grade, % of Weekly Goal, Total Weekly Minutes, Target Weekly Minutes, then the actual clocked session times for Monday–Friday, shown for **this week and last week** side by side. Pulled entirely from the `time_logs` actual-clock data, not the projected schedule — this is what you'd hand to a compliance reviewer.
 
 ## Scheduling logic (src/scheduler/generate.js)
 
@@ -42,9 +45,13 @@ npm start         # http://localhost:3300
 
 - `paras` + `para_availability` — one Para, up to 7 weekday rows (work start/end, break start + minutes, lunch start + minutes)
 - `students`
+- `student_notes` — timestamped case-note log per student, independent of the student's short `iep_notes` field
 - `assignments` — the caseload: para × student × weekly_minutes × session length × service type × group_tag × priority
-- `schedule_sessions` — generated output, one row per student per placed session block (group sessions produce one row per student, linked by `session_group_id`)
+- `time_logs` — actual delivered minutes from the live start/stop clock (or manual entry), one row per session, aggregated per `week_start_date` for the weekly-minutes comparison against `assignments.weekly_minutes`
+- `schedule_sessions` — generated **projected** output, one row per student per placed session block (group sessions produce one row per student, linked by `session_group_id`)
 - `schedule_runs` — one row per generate click, stores the compliance summary JSON so re-opening the Schedule tab shows the same report without recomputation
+
+Note the two different "minutes" concepts: `schedule_sessions` is what the auto-scheduler *projects* a Para's week to look like; `time_logs` is what was *actually* clocked. They're independent — the Caseloads tab shows actual vs. target from `time_logs`, the Schedule tab shows the projected week.
 
 ## What's intentionally different from HourHive core
 

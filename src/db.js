@@ -100,6 +100,32 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
   generated_at TEXT DEFAULT (datetime('now')),
   compliance_summary TEXT -- JSON blob: per-student minutes met/scheduled/target
 );
+
+-- Freeform, timestamped case notes on a student's record (separate from the short
+-- descriptive "notes" field on the student itself).
+CREATE TABLE IF NOT EXISTS student_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  org_id INTEGER NOT NULL REFERENCES organizations(id),
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  note TEXT NOT NULL,
+  author TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Actual delivered service time from a live start/stop clock, as distinct from the
+-- projected auto-generated schedule_sessions. One row per timed session; end_at/minutes
+-- are NULL while the clock is running.
+CREATE TABLE IF NOT EXISTS time_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  org_id INTEGER NOT NULL REFERENCES organizations(id),
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  para_id INTEGER NOT NULL REFERENCES paras(id) ON DELETE CASCADE,
+  week_start_date TEXT NOT NULL,
+  start_at TEXT NOT NULL,
+  end_at TEXT,
+  minutes INTEGER,
+  created_at TEXT DEFAULT (datetime('now'))
+);
 `);
 
 module.exports = db;

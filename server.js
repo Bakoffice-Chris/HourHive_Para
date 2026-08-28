@@ -9,6 +9,7 @@ const paraRoutes = require('./src/routes/paras');
 const studentRoutes = require('./src/routes/students');
 const assignmentRoutes = require('./src/routes/assignments');
 const scheduleRoutes = require('./src/routes/schedule');
+const timeLogRoutes = require('./src/routes/timeLogs');
 
 const app = express();
 app.use(cors());
@@ -19,6 +20,7 @@ app.use('/api/paras', requireAuth, paraRoutes);
 app.use('/api/students', requireAuth, studentRoutes);
 app.use('/api/assignments', requireAuth, assignmentRoutes);
 app.use('/api/schedule', requireAuth, scheduleRoutes);
+app.use('/api/time-logs', requireAuth, timeLogRoutes);
 
 app.get('/api/health', (req, res) => res.json({ ok: true, product: 'HourHive Caseload' }));
 

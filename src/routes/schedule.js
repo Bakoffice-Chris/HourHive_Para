@@ -1,15 +1,8 @@
 const express = require('express');
 const db = require('../db');
 const { generateSchedule } = require('../scheduler/generate');
+const { mondayOf } = require('../dateUtils');
 const router = express.Router();
-
-function mondayOf(dateStr) {
-  const d = dateStr ? new Date(dateStr + 'T00:00:00') : new Date();
-  const day = d.getDay(); // 0=Sun
-  const diff = day === 0 ? -6 : 1 - day;
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().slice(0, 10);
-}
 
 router.post('/generate', (req, res) => {
   const weekStartDate = mondayOf(req.body.week_start_date);
