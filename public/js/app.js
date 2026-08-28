@@ -439,7 +439,7 @@ function renderStudents(content, actions) {
   content.innerHTML = `
     <div class="card">
       <table>
-        <thead><tr><th>Name</th><th>Grade</th><th>Weekly Target</th><th>Availability</th><th>Notes</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Grade</th><th>Specialty / Para</th><th>Weekly Target</th><th>Availability</th><th>Notes</th><th></th></tr></thead>
         <tbody>
           ${state.students
             .map(
@@ -447,6 +447,7 @@ function renderStudents(content, actions) {
             <tr>
               <td>${s.name}</td>
               <td>${s.grade || '—'}</td>
+              <td>${summarizeStudentAssignments(s.id)}</td>
               <td class="mono">${s.target_weekly_minutes ? s.target_weekly_minutes + ' min' : '—'}</td>
               <td>${summarizeStudentAvailability(s.availability)}</td>
               <td style="color:var(--ink-soft)">${s.iep_notes || ''}</td>
@@ -467,6 +468,16 @@ function renderStudents(content, actions) {
   content.querySelectorAll('[data-notes]').forEach((b) => (b.onclick = () => openNotesModal(findStudent(b.dataset.notes))));
   content.querySelectorAll('[data-avail]').forEach((b) => (b.onclick = () => openStudentAvailabilityModal(findStudent(b.dataset.avail))));
   content.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deleteStudent(b.dataset.del)));
+}
+
+function summarizeStudentAssignments(studentId) {
+  const list = state.assignments.filter((a) => a.student_id === studentId);
+  if (list.length === 0) {
+    return '<span style="color:var(--danger);font-size:12px;font-weight:700;">Not assigned</span>';
+  }
+  return list
+    .map((a) => `<span class="badge badge-group" style="margin:0 4px 3px 0;">${a.specialty || '?'} \u00b7 ${a.para_name}</span>`)
+    .join('');
 }
 
 function summarizeStudentAvailability(avail) {
@@ -492,7 +503,7 @@ function openStudentModal(student) {
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML = `
-    <div class="modal">
+    <div class="modal" style="width:520px;">
       <h3>${isEdit ? 'Edit Student' : 'Add Student'}</h3>
       <div class="form-row"><label>Full name</label><input id="mName" value="${student?.name || ''}" placeholder="Ethan Brooks" /></div>
       <div class="form-row"><label>Grade</label><input id="mGrade" value="${student?.grade || ''}" placeholder="3rd" /></div>
@@ -502,12 +513,35 @@ function openStudentModal(student) {
         <div class="field-hint">Used as the default when you assign this student to a Para's caseload \u2014 the actual scheduling target still lives on that caseload assignment (a student can have more than one).</div>
       </div>
       <div class="form-row"><label>Notes (optional)</label><textarea id="mNotes" rows="3" placeholder="Service notes, e.g. speech/language support">${student?.iep_notes || ''}</textarea></div>
+      ${
+        isEdit
+          ? `<div class="form-row" style="border-top:1px solid var(--line);padding-top:14px;">
+               <label style="display:flex;align-items:center;justify-content:space-between;">
+                 Specialty Assignments
+                 <button class="btn btn-outline btn-sm" id="addSpecialtyBtn" type="button">+ Add Specialty</button>
+               </label>
+               <div id="studentAssignmentsList" style="margin-top:8px;"></div>
+             </div>`
+          : `<p class="field-hint">You'll be able to assign a specialty and Para once this student is saved.</p>`
+      }
       <div class="modal-actions">
         <button class="btn btn-outline" id="cancelBtn">Cancel</button>
         <button class="btn btn-amber" id="saveBtn">${isEdit ? 'Save changes' : 'Add Student'}</button>
       </div>
     </div>`;
   document.body.appendChild(backdrop);
+
+  if (isEdit) {
+    const listEl = backdrop.querySelector('#studentAssignmentsList');
+    renderStudentAssignmentsList(listEl, student.id);
+    backdrop.querySelector('#addSpecialtyBtn').onclick = () => {
+      openAssignmentModal(null, {
+        presetStudentId: student.id,
+        onSaved: () => renderStudentAssignmentsList(listEl, student.id),
+      });
+    };
+  }
+
   backdrop.querySelector('#cancelBtn').onclick = () => backdrop.remove();
   backdrop.querySelector('#saveBtn').onclick = async () => {
     const payload = {
@@ -528,6 +562,50 @@ function openStudentModal(student) {
       toast(e.message, true);
     }
   };
+}
+
+function renderStudentAssignmentsList(container, studentId) {
+  const list = state.assignments.filter((a) => a.student_id === studentId);
+  if (list.length === 0) {
+    container.innerHTML = `<p style="color:var(--danger);font-size:12.5px;margin:0;">No specialty assigned yet \u2014 this student won't appear in generated schedules until you add one.</p>`;
+    return;
+  }
+  container.innerHTML = list
+    .map(
+      (a) => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--paper-2);border-radius:7px;margin-bottom:6px;">
+        <div style="font-size:12.5px;">
+          <span class="badge badge-group">${a.specialty || '\u2014'}</span>
+          <strong style="margin-left:6px;">${a.para_name}</strong>
+          <span class="mono" style="color:var(--ink-soft);margin-left:6px;">${a.weekly_minutes} min/wk</span>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-outline btn-sm" data-edit-assign="${a.id}" type="button">Edit</button>
+          <button class="btn-danger-text" data-del-assign="${a.id}" type="button">Remove</button>
+        </div>
+      </div>`
+    )
+    .join('');
+
+  container.querySelectorAll('[data-edit-assign]').forEach((b) => {
+    b.onclick = () => {
+      const assignment = state.assignments.find((a) => String(a.id) === b.dataset.editAssign);
+      openAssignmentModal(assignment, { onSaved: () => renderStudentAssignmentsList(container, studentId) });
+    };
+  });
+  container.querySelectorAll('[data-del-assign]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('Remove this specialty assignment?')) return;
+      try {
+        await api(`/assignments/${b.dataset.delAssign}`, { method: 'DELETE' });
+        toast('Assignment removed');
+        await loadAll();
+        renderStudentAssignmentsList(container, studentId);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+  });
 }
 
 function openStudentAvailabilityModal(student) {
@@ -632,6 +710,13 @@ function openImportModal() {
         Optional columns: Session Length, Min Session Length, Service Type (<code>1:1</code> or <code>group</code>),
         Group Tag, Priority.
       </p>
+      <p class="field-hint" style="margin-bottom:10px;">
+        To also set a student's <strong>available times</strong>, add <strong>Available Day</strong>, <strong>Available Start</strong>,
+        and <strong>Available End</strong> columns (day as a name like "Monday" or a number 0\u20136; times as 24-hour HH:MM).
+        A student with several free periods just gets one row per window, same name each time \u2014 these can be on their
+        own rows or combined with a specialty row. Once a student has any availability rows, days with none become
+        fully unavailable for them, so list every day that applies.
+      </p>
       <p class="field-hint" style="margin-bottom:16px;">
         <a href="/api/students/import/template" id="templateLink" style="color:var(--amber-deep);font-weight:700;">Download a template CSV</a>
         \u2014 shows a student with two specialties and a group pair.
@@ -693,11 +778,12 @@ function openImportModal() {
       resultEl.innerHTML = `
         <div class="card" style="background:var(--paper-2);box-shadow:none;margin-top:4px;margin-bottom:0;max-height:260px;overflow-y:auto;">
           <div style="font-weight:700;color:var(--navy);margin-bottom:6px;">
-            ${data.students_imported} new student${data.students_imported === 1 ? '' : 's'} \u00b7 ${data.assignments_created} caseload assignment${data.assignments_created === 1 ? '' : 's'} created
+            ${data.students_imported} new student${data.students_imported === 1 ? '' : 's'} \u00b7 ${data.assignments_created} assignment${data.assignments_created === 1 ? '' : 's'} \u00b7 ${data.availability_windows_added} availability window${data.availability_windows_added === 1 ? '' : 's'}
           </div>
           <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px;">
             ${data.students_skipped_blank ? `${data.students_skipped_blank} row(s) skipped (blank name). ` : ''}
             ${data.assignments_skipped_duplicate ? `${data.assignments_skipped_duplicate} assignment(s) skipped (already existed). ` : ''}
+            ${data.availability_windows_skipped_duplicate ? `${data.availability_windows_skipped_duplicate} availability window(s) skipped (already existed). ` : ''}
             Processed ${data.total_rows} row${data.total_rows === 1 ? '' : 's'} total.
           </div>
           ${
@@ -926,8 +1012,11 @@ function defaultWeeklyMinutes(assignment) {
   return 60;
 }
 
-function openAssignmentModal(assignment) {
+function openAssignmentModal(assignment, opts = {}) {
+  const { presetStudentId, onSaved } = opts;
   const isEdit = !!assignment;
+  const lockStudent = isEdit || !!presetStudentId;
+  const defaultStudentId = presetStudentId || assignment?.student_id;
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML = `
@@ -949,8 +1038,8 @@ function openAssignmentModal(assignment) {
       </div>
       <div class="form-row">
         <label>Student</label>
-        <select id="mStudent" ${isEdit ? 'disabled' : ''}>
-          ${state.students.map((s) => `<option value="${s.id}" ${assignment?.student_id === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}
+        <select id="mStudent" ${lockStudent ? 'disabled' : ''}>
+          ${state.students.map((s) => `<option value="${s.id}" ${defaultStudentId === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}
         </select>
       </div>
       <div class="form-row">
@@ -1069,7 +1158,8 @@ function openAssignmentModal(assignment) {
       backdrop.remove();
       toast(isEdit ? 'Assignment updated' : 'Student added to caseload');
       await loadAll();
-      setView('caseloads');
+      if (onSaved) onSaved();
+      else setView('caseloads');
     } catch (e) {
       toast(e.message, true);
     }

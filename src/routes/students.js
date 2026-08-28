@@ -21,8 +21,40 @@ const MIN_SESSION_LEN_HEADERS = ['min session length', 'minimum session length',
 const SERVICE_TYPE_HEADERS = ['service type', 'type'];
 const GROUP_TAG_HEADERS = ['group tag', 'group_tag'];
 const PRIORITY_HEADERS = ['priority'];
+const AVAIL_DAY_HEADERS = ['available day', 'availability day', 'avail day', 'free day', 'day'];
+const AVAIL_START_HEADERS = ['available start', 'availability start', 'avail start', 'free start', 'start time'];
+const AVAIL_END_HEADERS = ['available end', 'availability end', 'avail end', 'free end', 'end time'];
 
 const SPECIALTY_LOOKUP = new Map(SPECIALTIES.map((s) => [s.toLowerCase(), s]));
+
+const DAY_NAME_TO_NUM = {
+  sun: 0, sunday: 0,
+  mon: 1, monday: 1,
+  tue: 2, tues: 2, tuesday: 2,
+  wed: 3, weds: 3, wednesday: 3,
+  thu: 4, thur: 4, thurs: 4, thursday: 4,
+  fri: 5, friday: 5,
+  sat: 6, saturday: 6,
+};
+
+// Returns a 0-6 day number, null if the cell is blank (no availability data on this row),
+// or undefined if the value couldn't be parsed (caller should report it as a row error).
+function parseDayCell(raw) {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (/^[0-6]$/.test(trimmed)) return Number(trimmed);
+  const num = DAY_NAME_TO_NUM[trimmed.toLowerCase()];
+  return num === undefined ? undefined : num;
+}
+
+const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+// Returns a normalized 'HH:MM' string, null if blank, or undefined if unparseable.
+function parseTimeCell(raw) {
+  if (!raw) return null;
+  const m = raw.trim().match(TIME_RE);
+  if (!m) return undefined;
+  return `${m[1].padStart(2, '0')}:${m[2]}`;
+}
 
 router.get('/', (req, res) => {
   const students = db
@@ -138,17 +170,19 @@ router.delete('/:id/notes/:noteId', (req, res) => {
 });
 
 // Downloadable starter CSV so it's obvious which columns are recognized. Shows the "long
-// format": one row per specialty need, so a student needing two specialties (or two
-// different Paras) just appears on two rows with the same name.
+// format": one row per specialty need (or per availability window), so a student needing
+// two specialties, two Paras, or multiple free periods just appears on multiple rows with
+// the same name.
 router.get('/import/template', (req, res) => {
   const csv =
-    'Name,Grade,Notes,Specialty,Weekly Minutes,Para,Session Length,Min Session Length,Service Type,Group Tag,Priority\n' +
-    'Ethan Brooks,3rd,"Speech/language support, works well 1:1",Speech,150,James Whitfield,30,15,1:1,,1\n' +
-    'Ethan Brooks,3rd,,OT,60,Maria Gonzalez,20,15,1:1,,2\n' +
-    'Ava Nguyen,4th,Reading fluency support,Reading,120,Maria Gonzalez,30,20,1:1,,2\n' +
-    'Sofia Ramirez,5th,Reading intervention,Reading,90,Maria Gonzalez,30,15,group,reading-grp-1,3\n' +
-    'Noah Patel,3rd,Reading intervention,Reading,90,Maria Gonzalez,30,15,group,reading-grp-1,3\n' +
-    'Isabella Kim,1st,,,,,,,,,\n';
+    'Name,Grade,Notes,Specialty,Weekly Minutes,Para,Session Length,Min Session Length,Service Type,Group Tag,Priority,Available Day,Available Start,Available End\n' +
+    'Ethan Brooks,3rd,"Speech/language support, works well 1:1",Speech,150,James Whitfield,30,15,1:1,,1,Monday,08:00,08:45\n' +
+    'Ethan Brooks,3rd,,OT,60,Maria Gonzalez,20,15,1:1,,2,Tuesday,08:00,08:45\n' +
+    'Ethan Brooks,3rd,,,,,,,,,,Wednesday,08:00,08:45\n' +
+    'Ava Nguyen,4th,Reading fluency support,Reading,120,Maria Gonzalez,30,20,1:1,,2,,,\n' +
+    'Sofia Ramirez,5th,Reading intervention,Reading,90,Maria Gonzalez,30,15,group,reading-grp-1,3,,,\n' +
+    'Noah Patel,3rd,Reading intervention,Reading,90,Maria Gonzalez,30,15,group,reading-grp-1,3,,,\n' +
+    'Isabella Kim,1st,,,,,,,,,,,,\n';
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="students-template.csv"');
   res.send(csv);
@@ -174,6 +208,9 @@ router.post('/import', upload.single('file'), (req, res) => {
   const serviceTypeIdx = col(SERVICE_TYPE_HEADERS);
   const groupTagIdx = col(GROUP_TAG_HEADERS);
   const priorityIdx = col(PRIORITY_HEADERS);
+  const availDayIdx = col(AVAIL_DAY_HEADERS);
+  const availStartIdx = col(AVAIL_START_HEADERS);
+  const availEndIdx = col(AVAIL_END_HEADERS);
 
   if (nameIdx === -1) {
     return res.status(400).json({
@@ -209,6 +246,16 @@ router.post('/import', upload.single('file'), (req, res) => {
       .all(req.user.org_id)
       .map((a) => `${a.para_id}:${a.student_id}:${a.specialty || ''}`)
   );
+  const existingAvailabilityKeys = new Set(
+    db
+      .prepare(
+        `SELECT sa.student_id, sa.day_of_week, sa.start_time, sa.end_time
+         FROM student_availability sa JOIN students s ON s.id = sa.student_id
+         WHERE s.org_id = ?`
+      )
+      .all(req.user.org_id)
+      .map((a) => `${a.student_id}:${a.day_of_week}:${a.start_time}:${a.end_time}`)
+  );
 
   const insertStudent = db.prepare('INSERT INTO students (org_id, name, grade, iep_notes) VALUES (?, ?, ?, ?)');
   const insertAssignment = db.prepare(`
@@ -216,12 +263,123 @@ router.post('/import', upload.single('file'), (req, res) => {
       (org_id, para_id, student_id, specialty, weekly_minutes, session_length, min_session_length, service_type, group_tag, priority)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const insertAvailability = db.prepare(
+    'INSERT INTO student_availability (student_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)'
+  );
 
   let studentsImported = 0;
   let studentsSkippedBlank = 0;
   let assignmentsCreated = 0;
   let assignmentsSkippedDuplicate = 0;
+  let availabilityWindowsAdded = 0;
+  let availabilityWindowsSkippedDuplicate = 0;
   const rowErrors = [];
+
+  function processSpecialtyCell(r, i, name, studentId) {
+    const specialtyRaw = cell(r, specialtyIdx);
+    if (!specialtyRaw) return; // no specialty need on this line
+
+    const specialty = SPECIALTY_LOOKUP.get(specialtyRaw.toLowerCase());
+    if (!specialty) {
+      rowErrors.push({ row: i + 1, error: `Unknown specialty "${specialtyRaw}". Must be one of: ${SPECIALTIES.join(', ')}` });
+      return;
+    }
+
+    const paraName = cell(r, paraIdx);
+    if (!paraName) {
+      rowErrors.push({ row: i + 1, error: `Specialty "${specialty}" given but no Para name in the Para column` });
+      return;
+    }
+    const paraId = existingParasByName.get(paraName.toLowerCase());
+    if (paraId === undefined) {
+      rowErrors.push({ row: i + 1, error: `No Para named "${paraName}" found. Add them under Para Instructors first.` });
+      return;
+    }
+    if (!paraHasSpecialty(paraId, specialty)) {
+      rowErrors.push({ row: i + 1, error: `${paraName} isn't assigned to the ${specialty} specialty (Para Instructors \u2192 Specialties).` });
+      return;
+    }
+
+    const minutesRaw = cell(r, minutesIdx);
+    const weeklyMinutes = Number(minutesRaw);
+    if (!minutesRaw || !Number.isFinite(weeklyMinutes) || weeklyMinutes <= 0) {
+      rowErrors.push({ row: i + 1, error: `Missing or invalid Weekly Minutes ("${minutesRaw}") for ${name}'s ${specialty} assignment` });
+      return;
+    }
+
+    const assignmentKey = `${paraId}:${studentId}:${specialty}`;
+    if (existingAssignmentKeys.has(assignmentKey)) {
+      assignmentsSkippedDuplicate++;
+      return;
+    }
+
+    const serviceTypeRaw = cell(r, serviceTypeIdx).toLowerCase();
+    const serviceType = serviceTypeRaw === 'group' ? 'group' : '1:1';
+    const groupTag = cell(r, groupTagIdx) || null;
+    if (serviceType === 'group' && !groupTag) {
+      rowErrors.push({ row: i + 1, error: `Service Type is "group" but Group Tag is blank for ${name}'s ${specialty} assignment` });
+      return;
+    }
+
+    const sessionLength = Number(cell(r, sessionLenIdx)) || 30;
+    const minSessionLength = Number(cell(r, minSessionLenIdx)) || 15;
+    const priority = Number(cell(r, priorityIdx)) || 3;
+
+    insertAssignment.run(
+      req.user.org_id,
+      paraId,
+      studentId,
+      specialty,
+      weeklyMinutes,
+      sessionLength,
+      minSessionLength,
+      serviceType,
+      groupTag,
+      priority
+    );
+    existingAssignmentKeys.add(assignmentKey);
+    assignmentsCreated++;
+  }
+
+  function processAvailabilityCell(r, i, name, studentId) {
+    const dayRaw = cell(r, availDayIdx);
+    const startRaw = cell(r, availStartIdx);
+    const endRaw = cell(r, availEndIdx);
+    if (!dayRaw && !startRaw && !endRaw) return; // no availability data on this line
+
+    const day = parseDayCell(dayRaw);
+    if (day === undefined) {
+      rowErrors.push({ row: i + 1, error: `Couldn't understand Available Day "${dayRaw}" for ${name}. Use a day name (Monday) or number (0-6).` });
+      return;
+    }
+    const start = parseTimeCell(startRaw);
+    if (start === undefined) {
+      rowErrors.push({ row: i + 1, error: `Couldn't understand Available Start "${startRaw}" for ${name}. Use 24-hour HH:MM, e.g. 08:30.` });
+      return;
+    }
+    const end = parseTimeCell(endRaw);
+    if (end === undefined) {
+      rowErrors.push({ row: i + 1, error: `Couldn't understand Available End "${endRaw}" for ${name}. Use 24-hour HH:MM, e.g. 09:15.` });
+      return;
+    }
+    if (day === null || start === null || end === null) {
+      rowErrors.push({ row: i + 1, error: `${name} has an availability window missing one of Day/Start/End \u2014 all three are needed together.` });
+      return;
+    }
+    if (end <= start) {
+      rowErrors.push({ row: i + 1, error: `${name}'s availability window end time (${end}) isn't after the start time (${start}).` });
+      return;
+    }
+
+    const key = `${studentId}:${day}:${start}:${end}`;
+    if (existingAvailabilityKeys.has(key)) {
+      availabilityWindowsSkippedDuplicate++;
+      return;
+    }
+    insertAvailability.run(studentId, day, start, end);
+    existingAvailabilityKeys.add(key);
+    availabilityWindowsAdded++;
+  }
 
   const tx = db.transaction(() => {
     for (let i = 1; i < rows.length; i++) {
@@ -242,72 +400,12 @@ router.post('/import', upload.single('file'), (req, res) => {
         existingStudentsByName.set(nameKey, studentId);
         studentsImported++;
       }
-      // else: this row is a second (or later) specialty line for a student already seen
-      // in this import (or already on the roster) — expected in the long format, not an error.
+      // else: this row is a second (or later) specialty/availability line for a student
+      // already seen in this import (or already on the roster) — expected in the long
+      // format, not an error.
 
-      const specialtyRaw = cell(r, specialtyIdx);
-      if (!specialtyRaw) continue; // roster-only row, no specialty need on this line
-
-      const specialty = SPECIALTY_LOOKUP.get(specialtyRaw.toLowerCase());
-      if (!specialty) {
-        rowErrors.push({ row: i + 1, error: `Unknown specialty "${specialtyRaw}". Must be one of: ${SPECIALTIES.join(', ')}` });
-        continue;
-      }
-
-      const paraName = cell(r, paraIdx);
-      if (!paraName) {
-        rowErrors.push({ row: i + 1, error: `Specialty "${specialty}" given but no Para name in the Para column` });
-        continue;
-      }
-      const paraId = existingParasByName.get(paraName.toLowerCase());
-      if (paraId === undefined) {
-        rowErrors.push({ row: i + 1, error: `No Para named "${paraName}" found. Add them under Para Instructors first.` });
-        continue;
-      }
-      if (!paraHasSpecialty(paraId, specialty)) {
-        rowErrors.push({ row: i + 1, error: `${paraName} isn't assigned to the ${specialty} specialty (Para Instructors \u2192 Specialties).` });
-        continue;
-      }
-
-      const minutesRaw = cell(r, minutesIdx);
-      const weeklyMinutes = Number(minutesRaw);
-      if (!minutesRaw || !Number.isFinite(weeklyMinutes) || weeklyMinutes <= 0) {
-        rowErrors.push({ row: i + 1, error: `Missing or invalid Weekly Minutes ("${minutesRaw}") for ${name}'s ${specialty} assignment` });
-        continue;
-      }
-
-      const assignmentKey = `${paraId}:${studentId}:${specialty}`;
-      if (existingAssignmentKeys.has(assignmentKey)) {
-        assignmentsSkippedDuplicate++;
-        continue;
-      }
-
-      const serviceTypeRaw = cell(r, serviceTypeIdx).toLowerCase();
-      const serviceType = serviceTypeRaw === 'group' ? 'group' : '1:1';
-      const groupTag = cell(r, groupTagIdx) || null;
-      if (serviceType === 'group' && !groupTag) {
-        rowErrors.push({ row: i + 1, error: `Service Type is "group" but Group Tag is blank for ${name}'s ${specialty} assignment` });
-        continue;
-      }
-
-      const sessionLength = Number(cell(r, sessionLenIdx)) || 30;
-      const minSessionLength = Number(cell(r, minSessionLenIdx)) || 15;
-      const priority = Number(cell(r, priorityIdx)) || 3;
-
-      insertAssignment.run(
-        req.user.org_id,
-        paraId,
-        studentId,
-        specialty,
-        weeklyMinutes,
-        sessionLength,
-        minSessionLength,
-        serviceType,
-        groupTag,
-        priority
-      );
-      existingAssignmentKeys.add(assignmentKey);
-      assignmentsCreated++;
+      processSpecialtyCell(r, i, name, studentId);
+      processAvailabilityCell(r, i, name, studentId);
     }
   });
   tx();
@@ -317,6 +415,8 @@ router.post('/import', upload.single('file'), (req, res) => {
     students_skipped_blank: studentsSkippedBlank,
     assignments_created: assignmentsCreated,
     assignments_skipped_duplicate: assignmentsSkippedDuplicate,
+    availability_windows_added: availabilityWindowsAdded,
+    availability_windows_skipped_duplicate: availabilityWindowsSkippedDuplicate,
     row_errors: rowErrors.slice(0, 15),
     row_error_count: rowErrors.length,
     total_rows: rows.length - 1,
