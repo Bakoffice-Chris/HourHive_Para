@@ -1,5 +1,6 @@
 const express = require('express');
 const db = require('../db');
+const { SPECIALTIES } = require('../specialties');
 const router = express.Router();
 
 router.get('/', (req, res) => {
@@ -7,7 +8,12 @@ router.get('/', (req, res) => {
     .prepare('SELECT * FROM paras WHERE org_id = ? ORDER BY name')
     .all(req.user.org_id);
   const availStmt = db.prepare('SELECT * FROM para_availability WHERE para_id = ? ORDER BY day_of_week');
-  const withAvail = paras.map((p) => ({ ...p, availability: availStmt.all(p.id) }));
+  const specStmt = db.prepare('SELECT specialty FROM para_specialties WHERE para_id = ? ORDER BY specialty');
+  const withAvail = paras.map((p) => ({
+    ...p,
+    availability: availStmt.all(p.id),
+    specialties: specStmt.all(p.id).map((s) => s.specialty),
+  }));
   res.json(withAvail);
 });
 
@@ -87,6 +93,34 @@ router.put('/:id/availability', (req, res) => {
     .prepare('SELECT * FROM para_availability WHERE para_id = ? ORDER BY day_of_week')
     .all(para.id);
   res.json({ ...para, availability });
+});
+
+// Replace the full set of specialties a Para is qualified/assigned to deliver.
+// body: { specialties: ['OT', 'Speech'] }
+router.put('/:id/specialties', (req, res) => {
+  const para = db
+    .prepare('SELECT * FROM paras WHERE id = ? AND org_id = ?')
+    .get(req.params.id, req.user.org_id);
+  if (!para) return res.status(404).json({ error: 'Para not found' });
+
+  const { specialties } = req.body;
+  if (!Array.isArray(specialties)) return res.status(400).json({ error: 'specialties array is required' });
+
+  const invalid = specialties.filter((s) => !SPECIALTIES.includes(s));
+  if (invalid.length > 0) {
+    return res.status(400).json({ error: `Unknown specialty: ${invalid.join(', ')}. Valid values: ${SPECIALTIES.join(', ')}` });
+  }
+
+  const del = db.prepare('DELETE FROM para_specialties WHERE para_id = ?');
+  const ins = db.prepare('INSERT INTO para_specialties (para_id, specialty) VALUES (?, ?)');
+  const tx = db.transaction((list) => {
+    del.run(para.id);
+    for (const s of [...new Set(list)]) ins.run(para.id, s);
+  });
+  tx(specialties);
+
+  const result = db.prepare('SELECT specialty FROM para_specialties WHERE para_id = ? ORDER BY specialty').all(para.id);
+  res.json({ ...para, specialties: result.map((r) => r.specialty) });
 });
 
 module.exports = router;

@@ -1,6 +1,13 @@
 const express = require('express');
 const db = require('../db');
+const { SPECIALTIES } = require('../specialties');
 const router = express.Router();
+
+function paraHasSpecialty(paraId, specialty) {
+  return !!db
+    .prepare('SELECT 1 FROM para_specialties WHERE para_id = ? AND specialty = ?')
+    .get(paraId, specialty);
+}
 
 router.get('/', (req, res) => {
   const rows = db
@@ -10,7 +17,7 @@ router.get('/', (req, res) => {
        JOIN paras p ON p.id = a.para_id
        JOIN students s ON s.id = a.student_id
        WHERE a.org_id = ?
-       ORDER BY p.name, s.name`
+       ORDER BY p.name, s.name, a.specialty`
     )
     .all(req.user.org_id);
   res.json(rows);
@@ -20,6 +27,7 @@ router.post('/', (req, res) => {
   const {
     para_id,
     student_id,
+    specialty,
     weekly_minutes,
     session_length,
     min_session_length,
@@ -31,21 +39,30 @@ router.post('/', (req, res) => {
   if (!para_id || !student_id || !weekly_minutes) {
     return res.status(400).json({ error: 'para_id, student_id, and weekly_minutes are required' });
   }
+  if (!specialty || !SPECIALTIES.includes(specialty)) {
+    return res.status(400).json({ error: `specialty is required and must be one of: ${SPECIALTIES.join(', ')}` });
+  }
   if (service_type === 'group' && !group_tag) {
     return res.status(400).json({ error: 'group_tag is required when service_type is "group"' });
+  }
+  if (!paraHasSpecialty(para_id, specialty)) {
+    return res.status(400).json({
+      error: `This Para isn't assigned to the ${specialty} specialty. Add ${specialty} to their specialties first, or choose a different Para.`,
+    });
   }
 
   try {
     const info = db
       .prepare(
         `INSERT INTO assignments
-          (org_id, para_id, student_id, weekly_minutes, session_length, min_session_length, service_type, group_tag, priority)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (org_id, para_id, student_id, specialty, weekly_minutes, session_length, min_session_length, service_type, group_tag, priority)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         req.user.org_id,
         para_id,
         student_id,
+        specialty,
         weekly_minutes,
         session_length || 30,
         min_session_length || 15,
@@ -63,7 +80,7 @@ router.post('/', (req, res) => {
     res.json(row);
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) {
-      return res.status(409).json({ error: 'This student is already on this Para\u2019s caseload' });
+      return res.status(409).json({ error: `This student already has a ${specialty} assignment with this Para` });
     }
     res.status(500).json({ error: e.message });
   }
@@ -75,6 +92,7 @@ router.put('/:id', (req, res) => {
     .get(req.params.id, req.user.org_id);
   if (!a) return res.status(404).json({ error: 'Assignment not found' });
   const {
+    specialty,
     weekly_minutes,
     session_length,
     min_session_length,
@@ -82,19 +100,38 @@ router.put('/:id', (req, res) => {
     group_tag,
     priority,
   } = req.body;
-  db.prepare(
-    `UPDATE assignments SET weekly_minutes = ?, session_length = ?, min_session_length = ?,
-       service_type = ?, group_tag = ?, priority = ? WHERE id = ?`
-  ).run(
-    weekly_minutes ?? a.weekly_minutes,
-    session_length ?? a.session_length,
-    min_session_length ?? a.min_session_length,
-    service_type ?? a.service_type,
-    group_tag ?? a.group_tag,
-    priority ?? a.priority,
-    a.id
-  );
-  res.json(db.prepare('SELECT * FROM assignments WHERE id = ?').get(a.id));
+
+  const nextSpecialty = specialty ?? a.specialty;
+  if (specialty !== undefined && !SPECIALTIES.includes(specialty)) {
+    return res.status(400).json({ error: `specialty must be one of: ${SPECIALTIES.join(', ')}` });
+  }
+  if (nextSpecialty && !paraHasSpecialty(a.para_id, nextSpecialty)) {
+    return res.status(400).json({
+      error: `This Para isn't assigned to the ${nextSpecialty} specialty. Add ${nextSpecialty} to their specialties first, or choose a different Para.`,
+    });
+  }
+
+  try {
+    db.prepare(
+      `UPDATE assignments SET specialty = ?, weekly_minutes = ?, session_length = ?, min_session_length = ?,
+         service_type = ?, group_tag = ?, priority = ? WHERE id = ?`
+    ).run(
+      nextSpecialty,
+      weekly_minutes ?? a.weekly_minutes,
+      session_length ?? a.session_length,
+      min_session_length ?? a.min_session_length,
+      service_type ?? a.service_type,
+      group_tag ?? a.group_tag,
+      priority ?? a.priority,
+      a.id
+    );
+    res.json(db.prepare('SELECT * FROM assignments WHERE id = ?').get(a.id));
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE')) {
+      return res.status(409).json({ error: `This student already has a ${nextSpecialty} assignment with this Para` });
+    }
+    res.status(500).json({ error: e.message });
+  }
 });
 
 router.delete('/:id', (req, res) => {

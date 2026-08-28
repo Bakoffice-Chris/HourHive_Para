@@ -4,6 +4,7 @@ const cors = require('cors');
 require('./src/db'); // ensures schema is created on boot
 
 const { requireAuth } = require('./src/auth');
+const { SPECIALTIES } = require('./src/specialties');
 const authRoutes = require('./src/routes/auth');
 const paraRoutes = require('./src/routes/paras');
 const studentRoutes = require('./src/routes/students');
@@ -22,6 +23,7 @@ app.use('/api/assignments', requireAuth, assignmentRoutes);
 app.use('/api/schedule', requireAuth, scheduleRoutes);
 app.use('/api/time-logs', requireAuth, timeLogRoutes);
 
+app.get('/api/specialties', requireAuth, (req, res) => res.json({ specialties: SPECIALTIES }));
 app.get('/api/health', (req, res) => res.json({ ok: true, product: 'HourHive Caseload' }));
 
 app.use(express.static(path.join(__dirname, 'public')));

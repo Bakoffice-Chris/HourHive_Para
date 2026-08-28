@@ -1,6 +1,7 @@
 const API = '/api';
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const WORK_DAYS = [1, 2, 3, 4, 5];
+const SPECIALTIES = ['OT', 'PT', 'Speech', 'EL', 'Sped', 'Reading'];
 
 let state = {
   token: localStorage.getItem('hh_token') || null,
@@ -15,7 +16,7 @@ let state = {
   timerTickHandle: null,
 };
 
-function timerKey(paraId, studentId) { return `${paraId}:${studentId}`; }
+function timerKey(paraId, studentId, specialty) { return `${paraId}:${studentId}:${specialty || ''}`; }
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -130,9 +131,9 @@ async function loadAll() {
     state.students = students;
     state.assignments = assignments;
     state.runningTimers = {};
-    running.forEach((r) => (state.runningTimers[timerKey(r.para_id, r.student_id)] = r));
+    running.forEach((r) => (state.runningTimers[timerKey(r.para_id, r.student_id, r.specialty)] = r));
     state.weeklyActual = {};
-    weekly.summary.forEach((s) => (state.weeklyActual[timerKey(s.para_id, s.student_id)] = s.actual_minutes));
+    weekly.summary.forEach((s) => (state.weeklyActual[timerKey(s.para_id, s.student_id, s.specialty)] = s.actual_minutes));
     startTimerTicker();
     render();
   } catch (e) {
@@ -203,7 +204,7 @@ function renderParas(content, actions) {
   content.innerHTML = `
     <div class="card">
       <table>
-        <thead><tr><th>Name</th><th>Title</th><th>Email</th><th>Weekly Availability</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Title</th><th>Specialties</th><th>Email</th><th>Weekly Availability</th><th></th></tr></thead>
         <tbody>
           ${state.paras
             .map(
@@ -211,9 +212,11 @@ function renderParas(content, actions) {
             <tr>
               <td><span class="color-dot" style="background:${p.color}"></span>${p.name}</td>
               <td>${p.title || ''}</td>
+              <td>${summarizeSpecialties(p.specialties)}</td>
               <td>${p.email || '—'}</td>
               <td>${summarizeAvailability(p.availability)}</td>
               <td class="table-actions">
+                <button class="btn btn-outline btn-sm" data-specialties="${p.id}">Specialties</button>
                 <button class="btn btn-outline btn-sm" data-avail="${p.id}">Set Hours</button>
                 <button class="btn btn-outline btn-sm" data-edit="${p.id}">Edit</button>
                 <button class="btn-danger-text" data-del="${p.id}">Remove</button>
@@ -227,17 +230,61 @@ function renderParas(content, actions) {
   `;
   content.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openParaModal(findPara(b.dataset.edit))));
   content.querySelectorAll('[data-avail]').forEach((b) => (b.onclick = () => openAvailabilityModal(findPara(b.dataset.avail))));
+  content.querySelectorAll('[data-specialties]').forEach((b) => (b.onclick = () => openParaSpecialtiesModal(findPara(b.dataset.specialties))));
   content.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deletePara(b.dataset.del)));
 }
 
 function findPara(id) { return state.paras.find((p) => String(p.id) === String(id)); }
 function findStudent(id) { return state.students.find((s) => String(s.id) === String(id)); }
 
+function summarizeSpecialties(specialties) {
+  if (!specialties || specialties.length === 0) return '<span style="color:var(--danger);font-size:12px;">None assigned</span>';
+  return specialties.map((s) => `<span class="badge badge-group" style="margin-right:4px;">${s}</span>`).join('');
+}
+
 function summarizeAvailability(avail) {
   if (!avail || avail.length === 0) return '<span style="color:var(--danger)">Not set</span>';
   const days = avail.map((a) => DAYS[a.day_of_week]).join('/');
   const sample = avail[0];
   return `${days} · ${sample.work_start}–${sample.work_end}`;
+}
+
+function openParaSpecialtiesModal(para) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal">
+      <h3>${para.name} — Specialties</h3>
+      <p class="field-hint" style="margin-bottom:14px;">
+        Which IEP specialties is this Para qualified/assigned to deliver? Caseload assignments and the
+        auto-scheduler only match students to this Para for the specialties checked here.
+      </p>
+      <div id="specialtyChecks" style="margin-bottom:8px;">
+        ${SPECIALTIES.map(
+          (s) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:14px;font-weight:600;color:var(--ink);">
+            <input type="checkbox" value="${s}" ${(para.specialties || []).includes(s) ? 'checked' : ''} /> ${s}
+          </label>`
+        ).join('')}
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="cancelBtn">Cancel</button>
+        <button class="btn btn-amber" id="saveBtn">Save specialties</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('#cancelBtn').onclick = () => backdrop.remove();
+  backdrop.querySelector('#saveBtn').onclick = async () => {
+    const specialties = [...backdrop.querySelectorAll('#specialtyChecks input:checked')].map((c) => c.value);
+    try {
+      await api(`/paras/${para.id}/specialties`, { method: 'PUT', body: JSON.stringify({ specialties }) });
+      backdrop.remove();
+      toast('Specialties saved');
+      await loadAll();
+      setView('paras');
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
 }
 
 async function deletePara(id) {
@@ -392,7 +439,7 @@ function renderStudents(content, actions) {
   content.innerHTML = `
     <div class="card">
       <table>
-        <thead><tr><th>Name</th><th>Grade</th><th>Notes</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Grade</th><th>Weekly Target</th><th>Availability</th><th>Notes</th><th></th></tr></thead>
         <tbody>
           ${state.students
             .map(
@@ -400,8 +447,11 @@ function renderStudents(content, actions) {
             <tr>
               <td>${s.name}</td>
               <td>${s.grade || '—'}</td>
+              <td class="mono">${s.target_weekly_minutes ? s.target_weekly_minutes + ' min' : '—'}</td>
+              <td>${summarizeStudentAvailability(s.availability)}</td>
               <td style="color:var(--ink-soft)">${s.iep_notes || ''}</td>
               <td class="table-actions">
+                <button class="btn btn-outline btn-sm" data-avail="${s.id}">Availability</button>
                 <button class="btn btn-outline btn-sm" data-notes="${s.id}">Case Notes</button>
                 <button class="btn btn-outline btn-sm" data-edit="${s.id}">Edit</button>
                 <button class="btn-danger-text" data-del="${s.id}">Remove</button>
@@ -415,7 +465,14 @@ function renderStudents(content, actions) {
   `;
   content.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openStudentModal(findStudent(b.dataset.edit))));
   content.querySelectorAll('[data-notes]').forEach((b) => (b.onclick = () => openNotesModal(findStudent(b.dataset.notes))));
+  content.querySelectorAll('[data-avail]').forEach((b) => (b.onclick = () => openStudentAvailabilityModal(findStudent(b.dataset.avail))));
   content.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deleteStudent(b.dataset.del)));
+}
+
+function summarizeStudentAvailability(avail) {
+  if (!avail || avail.length === 0) return '<span style="color:var(--ink-soft);font-size:12px;">Unrestricted</span>';
+  const days = [...new Set(avail.map((a) => DAYS[a.day_of_week]))].join('/');
+  return `<span style="font-size:12px;">${days} \u00b7 ${avail.length} window${avail.length === 1 ? '' : 's'}</span>`;
 }
 
 async function deleteStudent(id) {
@@ -439,6 +496,11 @@ function openStudentModal(student) {
       <h3>${isEdit ? 'Edit Student' : 'Add Student'}</h3>
       <div class="form-row"><label>Full name</label><input id="mName" value="${student?.name || ''}" placeholder="Ethan Brooks" /></div>
       <div class="form-row"><label>Grade</label><input id="mGrade" value="${student?.grade || ''}" placeholder="3rd" /></div>
+      <div class="form-row">
+        <label>Required weekly minutes (IEP minimum)</label>
+        <input id="mTargetMinutes" type="number" min="1" value="${student?.target_weekly_minutes || ''}" placeholder="e.g. 150" />
+        <div class="field-hint">Used as the default when you assign this student to a Para's caseload \u2014 the actual scheduling target still lives on that caseload assignment (a student can have more than one).</div>
+      </div>
       <div class="form-row"><label>Notes (optional)</label><textarea id="mNotes" rows="3" placeholder="Service notes, e.g. speech/language support">${student?.iep_notes || ''}</textarea></div>
       <div class="modal-actions">
         <button class="btn btn-outline" id="cancelBtn">Cancel</button>
@@ -452,6 +514,7 @@ function openStudentModal(student) {
       name: backdrop.querySelector('#mName').value.trim(),
       grade: backdrop.querySelector('#mGrade').value.trim(),
       iep_notes: backdrop.querySelector('#mNotes').value.trim(),
+      target_weekly_minutes: Number(backdrop.querySelector('#mTargetMinutes').value) || null,
     };
     if (!payload.name) return toast('Name is required', true);
     try {
@@ -467,19 +530,111 @@ function openStudentModal(student) {
   };
 }
 
+function openStudentAvailabilityModal(student) {
+  const existingByDay = {};
+  (student.availability || []).forEach((a) => {
+    existingByDay[a.day_of_week] = existingByDay[a.day_of_week] || [];
+    existingByDay[a.day_of_week].push(a);
+  });
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal" style="width:600px;">
+      <h3>${student.name} — Available Times</h3>
+      <p class="field-hint" style="margin-bottom:14px;">
+        Add one or more windows per day when this student can be pulled for services (e.g. free periods).
+        The scheduler only places sessions where the Para is free <strong>and</strong> the student is free.
+        <strong>Leave every day empty to leave this student unrestricted</strong> \u2014 the moment you add any
+        window, days with no windows are treated as fully unavailable, so add a window for every day that applies.
+      </p>
+      <div id="studentAvailDays"></div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="cancelBtn">Cancel</button>
+        <button class="btn btn-amber" id="saveBtn">Save availability</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  const daysEl = backdrop.querySelector('#studentAvailDays');
+
+  function renderDayRow(day) {
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'padding:12px 0;border-bottom:1px solid var(--paper-2);';
+    wrapper.dataset.day = day;
+    wrapper.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <span class="day-label">${DAYS[day]}</span>
+        <button class="btn btn-outline btn-sm" data-add-window="${day}">+ Add window</button>
+      </div>
+      <div class="windows-list" data-windows-for="${day}"></div>
+    `;
+    daysEl.appendChild(wrapper);
+
+    const windowsList = wrapper.querySelector('.windows-list');
+    function addWindowRow(start = '09:00', end = '09:30') {
+      const row = document.createElement('div');
+      row.className = 'time-pair';
+      row.style.cssText = 'margin-bottom:6px;';
+      row.innerHTML = `
+        <input type="time" class="w-start" value="${start}" />
+        <span>\u2013</span>
+        <input type="time" class="w-end" value="${end}" />
+        <button class="btn-danger-text" style="margin-left:6px;">Remove</button>
+      `;
+      row.querySelector('.btn-danger-text').onclick = () => row.remove();
+      windowsList.appendChild(row);
+    }
+
+    (existingByDay[day] || []).forEach((w) => addWindowRow(w.start_time, w.end_time));
+    wrapper.querySelector('[data-add-window]').onclick = () => addWindowRow();
+  }
+
+  WORK_DAYS.forEach(renderDayRow);
+
+  backdrop.querySelector('#cancelBtn').onclick = () => backdrop.remove();
+  backdrop.querySelector('#saveBtn').onclick = async () => {
+    const days = [];
+    daysEl.querySelectorAll('[data-windows-for]').forEach((list) => {
+      const day = Number(list.dataset.windowsFor);
+      list.querySelectorAll('.time-pair').forEach((row) => {
+        const start = row.querySelector('.w-start').value;
+        const end = row.querySelector('.w-end').value;
+        if (start && end) days.push({ day_of_week: day, start_time: start, end_time: end });
+      });
+    });
+    try {
+      await api(`/students/${student.id}/availability`, { method: 'PUT', body: JSON.stringify({ days }) });
+      backdrop.remove();
+      toast('Availability saved');
+      await loadAll();
+      setView('students');
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+}
+
 function openImportModal() {
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML = `
-    <div class="modal">
+    <div class="modal" style="width:560px;">
       <h3>Import Students from CSV</h3>
-      <p class="field-hint" style="margin-bottom:14px;">
+      <p class="field-hint" style="margin-bottom:10px;">
         First row must be a header with at least a <strong>Name</strong> column. <strong>Grade</strong> and
-        <strong>Notes</strong> columns are optional and picked up automatically if present.
-        Students already on your roster (matched by name) are skipped, not duplicated.
+        <strong>Notes</strong> are optional. Students already on your roster (matched by name) are reused, not duplicated.
+      </p>
+      <p class="field-hint" style="margin-bottom:10px;">
+        To also create caseload assignments, add <strong>Specialty</strong>, <strong>Weekly Minutes</strong>, and
+        <strong>Para</strong> columns (Para must already exist and be assigned that specialty). A student needing more
+        than one specialty \u2014 or the same specialty from two different Paras \u2014 just gets two rows with the same name.
+        Optional columns: Session Length, Min Session Length, Service Type (<code>1:1</code> or <code>group</code>),
+        Group Tag, Priority.
       </p>
       <p class="field-hint" style="margin-bottom:16px;">
         <a href="/api/students/import/template" id="templateLink" style="color:var(--amber-deep);font-weight:700;">Download a template CSV</a>
+        \u2014 shows a student with two specialties and a group pair.
       </p>
       <div class="form-row">
         <label>CSV file</label>
@@ -536,22 +691,37 @@ function openImportModal() {
       if (!res.ok) throw new Error(data.error || 'Import failed');
 
       resultEl.innerHTML = `
-        <div class="card" style="background:var(--paper-2);box-shadow:none;margin-top:4px;margin-bottom:0;">
+        <div class="card" style="background:var(--paper-2);box-shadow:none;margin-top:4px;margin-bottom:0;max-height:260px;overflow-y:auto;">
           <div style="font-weight:700;color:var(--navy);margin-bottom:6px;">
-            Imported ${data.imported} of ${data.total_rows} row${data.total_rows === 1 ? '' : 's'}
+            ${data.students_imported} new student${data.students_imported === 1 ? '' : 's'} \u00b7 ${data.assignments_created} caseload assignment${data.assignments_created === 1 ? '' : 's'} created
           </div>
-          <div style="font-size:12.5px;color:var(--ink-soft);">
-            ${data.skipped_duplicates ? `${data.skipped_duplicates} skipped (already on roster). ` : ''}
-            ${data.skipped_blank ? `${data.skipped_blank} skipped (blank name). ` : ''}
-            ${!data.skipped_duplicates && !data.skipped_blank ? 'No rows were skipped.' : ''}
+          <div style="font-size:12.5px;color:var(--ink-soft);margin-bottom:8px;">
+            ${data.students_skipped_blank ? `${data.students_skipped_blank} row(s) skipped (blank name). ` : ''}
+            ${data.assignments_skipped_duplicate ? `${data.assignments_skipped_duplicate} assignment(s) skipped (already existed). ` : ''}
+            Processed ${data.total_rows} row${data.total_rows === 1 ? '' : 's'} total.
           </div>
+          ${
+            data.row_error_count
+              ? `<div style="font-size:12px;color:var(--danger);font-weight:700;margin-bottom:4px;">${data.row_error_count} row${data.row_error_count === 1 ? '' : 's'} had a problem:</div>
+                 <ul style="margin:0;padding-left:18px;font-size:12px;color:var(--danger);">
+                   ${data.row_errors.map((e) => `<li>Row ${e.row}: ${e.error}</li>`).join('')}
+                   ${data.row_error_count > data.row_errors.length ? `<li>...and ${data.row_error_count - data.row_errors.length} more</li>` : ''}
+                 </ul>`
+              : '<div style="font-size:12px;color:var(--success);font-weight:700;">No row errors.</div>'
+          }
         </div>
       `;
-      toast(`${data.imported} student${data.imported === 1 ? '' : 's'} imported`);
+      toast(`${data.students_imported} student${data.students_imported === 1 ? '' : 's'}, ${data.assignments_created} assignment${data.assignments_created === 1 ? '' : 's'} imported`);
       await loadAll();
       setView('students');
-      // Leave the result summary visible for a moment rather than closing immediately.
-      setTimeout(() => backdrop.remove(), 1800);
+      // If there were row errors worth reading, leave the modal open so the admin can
+      // review them; otherwise close it after a moment.
+      if (!data.row_error_count) {
+        setTimeout(() => backdrop.remove(), 1800);
+      } else {
+        importBtn.style.display = 'none';
+        backdrop.querySelector('#cancelBtn').textContent = 'Close';
+      }
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -664,11 +834,11 @@ function renderCaseloads(content, actions) {
       <div class="card">
         <h3>${list[0].para_name} <span style="color:var(--ink-soft);font-weight:500;font-size:13px;">— ${total} min/week caseload total</span></h3>
         <table>
-          <thead><tr><th>Student</th><th>Weekly Minutes</th><th>Session Length</th><th>Type</th><th>Live Clock</th><th></th></tr></thead>
+          <thead><tr><th>Student</th><th>Specialty</th><th>Weekly Minutes</th><th>Session Length</th><th>Type</th><th>Live Clock</th><th></th></tr></thead>
           <tbody>
             ${list
               .map((a) => {
-                const key = timerKey(a.para_id, a.student_id);
+                const key = timerKey(a.para_id, a.student_id, a.specialty);
                 const running = state.runningTimers[key];
                 const actual = state.weeklyActual[key] || 0;
                 const pct = Math.min(100, Math.round((actual / a.weekly_minutes) * 100));
@@ -677,10 +847,11 @@ function renderCaseloads(content, actions) {
                        <span class="timer-elapsed mono" data-start="${running.start_at}" style="font-weight:700;color:var(--success);">00:00:00</span>
                        <button class="btn btn-sm" style="background:var(--danger-bg);color:var(--danger);border-color:transparent;" data-stop="${running.id}">Stop</button>
                      </div>`
-                  : `<button class="btn btn-outline btn-sm" data-start-para="${a.para_id}" data-start-student="${a.student_id}">▶ Start</button>`;
+                  : `<button class="btn btn-outline btn-sm" data-start-para="${a.para_id}" data-start-student="${a.student_id}" data-start-specialty="${a.specialty || ''}">▶ Start</button>`;
                 return `
               <tr>
                 <td>${a.student_name}</td>
+                <td>${a.specialty ? `<span class="badge badge-group">${a.specialty}</span>` : '<span style="color:var(--ink-soft);font-size:12px;">—</span>'}</td>
                 <td class="mono">${a.weekly_minutes} min</td>
                 <td class="mono">${a.session_length} min (min ${a.min_session_length})</td>
                 <td>${a.service_type === 'group' ? `<span class="badge badge-group">Group · ${a.group_tag}</span>` : '<span class="badge badge-11">1:1</span>'}</td>
@@ -708,14 +879,14 @@ function renderCaseloads(content, actions) {
   );
   content.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deleteAssignment(b.dataset.del)));
   content.querySelectorAll('[data-start-para]').forEach(
-    (b) => (b.onclick = () => startClock(Number(b.dataset.startPara), Number(b.dataset.startStudent)))
+    (b) => (b.onclick = () => startClock(Number(b.dataset.startPara), Number(b.dataset.startStudent), b.dataset.startSpecialty || null))
   );
   content.querySelectorAll('[data-stop]').forEach((b) => (b.onclick = () => stopClock(b.dataset.stop)));
 }
 
-async function startClock(paraId, studentId) {
+async function startClock(paraId, studentId, specialty) {
   try {
-    await api('/time-logs/start', { method: 'POST', body: JSON.stringify({ para_id: paraId, student_id: studentId }) });
+    await api('/time-logs/start', { method: 'POST', body: JSON.stringify({ para_id: paraId, student_id: studentId, specialty }) });
     toast('Clock started');
     await loadAll();
     setView('caseloads');
@@ -750,6 +921,11 @@ async function deleteAssignment(id) {
   }
 }
 
+function defaultWeeklyMinutes(assignment) {
+  if (assignment) return assignment.weekly_minutes;
+  return 60;
+}
+
 function openAssignmentModal(assignment) {
   const isEdit = !!assignment;
   const backdrop = document.createElement('div');
@@ -758,10 +934,18 @@ function openAssignmentModal(assignment) {
     <div class="modal">
       <h3>${isEdit ? 'Edit Caseload Assignment' : 'Assign Student to a Para'}</h3>
       <div class="form-row">
+        <label>IEP Specialty</label>
+        <select id="mSpecialty" ${isEdit ? 'disabled' : ''}>
+          <option value="">Select a specialty\u2026</option>
+          ${SPECIALTIES.map((s) => `<option value="${s}" ${assignment?.specialty === s ? 'selected' : ''}>${s}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row">
         <label>Para Instructor</label>
         <select id="mPara" ${isEdit ? 'disabled' : ''}>
-          ${state.paras.map((p) => `<option value="${p.id}" ${assignment?.para_id === p.id ? 'selected' : ''}>${p.name}</option>`).join('')}
+          <option value="">Choose a specialty first\u2026</option>
         </select>
+        <div class="field-hint" id="paraFilterHint">Only Paras assigned to the chosen specialty are shown.</div>
       </div>
       <div class="form-row">
         <label>Student</label>
@@ -769,7 +953,11 @@ function openAssignmentModal(assignment) {
           ${state.students.map((s) => `<option value="${s.id}" ${assignment?.student_id === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}
         </select>
       </div>
-      <div class="form-row"><label>Required minutes per week</label><input id="mMinutes" type="number" min="1" value="${assignment?.weekly_minutes || 60}" /></div>
+      <div class="form-row">
+        <label>Required minutes per week</label>
+        <input id="mMinutes" type="number" min="1" value="${assignment?.weekly_minutes || defaultWeeklyMinutes(assignment)}" />
+        <div class="field-hint" id="minutesPrefillHint"></div>
+      </div>
       <div class="form-grid-2">
         <div class="form-row"><label>Preferred session length (min)</label><input id="mSessLen" type="number" min="5" value="${assignment?.session_length || 30}" /></div>
         <div class="form-row"><label>Minimum session length (min)</label><input id="mMinLen" type="number" min="5" value="${assignment?.min_session_length || 15}" /></div>
@@ -783,8 +971,8 @@ function openAssignmentModal(assignment) {
       </div>
       <div class="form-row hidden" id="groupTagRow">
         <label>Group tag</label>
-        <input id="mGroupTag" value="${assignment?.group_tag || ''}" placeholder="e.g. math-grp-1" />
-        <div class="field-hint">Students with the same Para and the same group tag are scheduled together in one time block.</div>
+        <input id="mGroupTag" value="${assignment?.group_tag || ''}" placeholder="e.g. reading-grp-1" />
+        <div class="field-hint">Students with the same Para, same specialty, and the same group tag are scheduled together in one time block.</div>
       </div>
       <div class="form-row">
         <label>Priority</label>
@@ -809,11 +997,64 @@ function openAssignmentModal(assignment) {
   typeSel.onchange = syncGroupRow;
   syncGroupRow();
 
+  const specialtySel = backdrop.querySelector('#mSpecialty');
+  const paraSel = backdrop.querySelector('#mPara');
+  const paraFilterHint = backdrop.querySelector('#paraFilterHint');
+
+  function refreshParaOptions() {
+    const specialty = specialtySel.value;
+    if (!specialty) {
+      paraSel.innerHTML = '<option value="">Choose a specialty first\u2026</option>';
+      paraFilterHint.textContent = 'Only Paras assigned to the chosen specialty are shown.';
+      return;
+    }
+    const qualified = state.paras.filter((p) => (p.specialties || []).includes(specialty));
+    if (qualified.length === 0) {
+      paraSel.innerHTML = '<option value="">No Para assigned to this specialty</option>';
+      paraFilterHint.innerHTML = `No Para is set up for <strong>${specialty}</strong> yet. Add it under Para Instructors \u2192 Specialties first.`;
+      return;
+    }
+    paraSel.innerHTML = qualified
+      .map((p) => `<option value="${p.id}" ${assignment?.para_id === p.id ? 'selected' : ''}>${p.name}</option>`)
+      .join('');
+    paraFilterHint.textContent = `Showing only Paras assigned to ${specialty}.`;
+  }
+  specialtySel.onchange = refreshParaOptions;
+  if (isEdit) {
+    // Editing: specialty/para are locked, just show the current para as the only option.
+    paraSel.innerHTML = `<option value="${assignment.para_id}" selected>${assignment.para_name}</option>`;
+    paraFilterHint.textContent = '';
+  } else {
+    refreshParaOptions();
+  }
+
+  if (!isEdit) {
+    const studentSel = backdrop.querySelector('#mStudent');
+    const minutesInput = backdrop.querySelector('#mMinutes');
+    const hintEl = backdrop.querySelector('#minutesPrefillHint');
+    const applyPrefill = () => {
+      const student = findStudent(studentSel.value);
+      if (student && student.target_weekly_minutes) {
+        minutesInput.value = student.target_weekly_minutes;
+        hintEl.textContent = `Prefilled from ${student.name}'s profile target. Adjust if this Para is only covering part of it.`;
+      } else {
+        hintEl.textContent = '';
+      }
+    };
+    studentSel.onchange = applyPrefill;
+    applyPrefill();
+  }
+
   backdrop.querySelector('#cancelBtn').onclick = () => backdrop.remove();
   backdrop.querySelector('#saveBtn').onclick = async () => {
+    const specialty = isEdit ? assignment.specialty : specialtySel.value;
+    if (!isEdit && !specialty) return toast('Choose an IEP specialty', true);
+    if (!isEdit && !paraSel.value) return toast('No qualified Para selected', true);
+
     const payload = {
-      para_id: Number(backdrop.querySelector('#mPara').value),
+      para_id: Number(paraSel.value || assignment.para_id),
       student_id: Number(backdrop.querySelector('#mStudent').value),
+      specialty,
       weekly_minutes: Number(backdrop.querySelector('#mMinutes').value),
       session_length: Number(backdrop.querySelector('#mSessLen').value),
       min_session_length: Number(backdrop.querySelector('#mMinLen').value),
@@ -853,6 +1094,7 @@ async function renderSchedule(content, actions) {
         <input type="date" id="weekPicker" value="${weekStart}" style="margin-left:8px;" />
       </label>
       <button class="btn btn-amber" id="genBtn">Generate schedule</button>
+      <button class="btn btn-outline" id="manualBtn">+ Add manual session</button>
       <span style="color:var(--ink-soft);font-size:12.5px;">Fills open Para time with student sessions until weekly minute targets are met.</span>
     </div>
     <div id="scheduleBody"></div>
@@ -876,22 +1118,130 @@ async function renderSchedule(content, actions) {
       btn.textContent = 'Generate schedule';
     }
   };
+  document.getElementById('manualBtn').onclick = () => openManualSessionModal(weekStart);
   await loadSchedule(weekStart);
+}
+
+function openManualSessionModal(weekStart) {
+  if (state.paras.length === 0) return toast('Add a Para Instructor first', true);
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal">
+      <h3>Add Manual Session</h3>
+      <p class="field-hint" style="margin-bottom:14px;">
+        Place a session on top of the generated schedule \u2014 useful for combining two students into one slot,
+        or covering a session the auto-generator couldn't fit. Pick 2 or more students to co-schedule them together.
+      </p>
+      <div class="form-row">
+        <label>Para Instructor</label>
+        <select id="mPara">
+          ${state.paras.map((p) => `<option value="${p.id}">${p.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Caseload entries (student \u2014 specialty)</label>
+        <div id="studentChecks" style="max-height:160px;overflow-y:auto;border:1.5px solid var(--line);border-radius:7px;padding:8px 10px;"></div>
+        <div class="field-hint">Only this Para's actual caseload assignments are shown, so minutes count toward the right specialty target and a double-booked student is blocked automatically.</div>
+      </div>
+      <div class="form-grid-2">
+        <div class="form-row">
+          <label>Day</label>
+          <select id="mDay">
+            ${WORK_DAYS.map((d) => `<option value="${d}">${DAYS[d]}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row"></div>
+      </div>
+      <div class="form-grid-2">
+        <div class="form-row"><label>Start time</label><input type="time" id="mStart" value="09:00" /></div>
+        <div class="form-row"><label>End time</label><input type="time" id="mEnd" value="09:30" /></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="cancelBtn">Cancel</button>
+        <button class="btn btn-amber" id="saveBtn">Add session</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  const paraSel = backdrop.querySelector('#mPara');
+  const checksEl = backdrop.querySelector('#studentChecks');
+
+  function refreshStudentChecks() {
+    const paraId = Number(paraSel.value);
+    const caseload = state.assignments.filter((a) => a.para_id === paraId);
+    if (caseload.length === 0) {
+      checksEl.innerHTML = '<p style="color:var(--ink-soft);font-size:12.5px;margin:0;">This Para has no caseload assignments yet.</p>';
+      return;
+    }
+    checksEl.innerHTML = caseload
+      .map(
+        (a) => `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;font-weight:500;color:var(--ink);">
+          <input type="checkbox" data-student="${a.student_id}" data-specialty="${a.specialty || ''}" />
+          ${a.student_name} ${a.specialty ? `<span class="badge badge-group" style="font-size:10px;">${a.specialty}</span>` : ''}
+        </label>`
+      )
+      .join('');
+  }
+  paraSel.onchange = refreshStudentChecks;
+  refreshStudentChecks();
+
+  backdrop.querySelector('#cancelBtn').onclick = () => backdrop.remove();
+  backdrop.querySelector('#saveBtn').onclick = async () => {
+    const entries = [...checksEl.querySelectorAll('input[type=checkbox]:checked')].map((c) => ({
+      student_id: Number(c.dataset.student),
+      specialty: c.dataset.specialty || null,
+    }));
+    if (entries.length === 0) return toast('Select at least one student', true);
+    const startTime = backdrop.querySelector('#mStart').value;
+    const endTime = backdrop.querySelector('#mEnd').value;
+    if (!startTime || !endTime || endTime <= startTime) return toast('End time must be after start time', true);
+
+    try {
+      await api('/schedule/manual', {
+        method: 'POST',
+        body: JSON.stringify({
+          week_start_date: weekStart,
+          para_id: Number(paraSel.value),
+          day_of_week: Number(backdrop.querySelector('#mDay').value),
+          start_time: startTime,
+          end_time: endTime,
+          entries,
+        }),
+      });
+      backdrop.remove();
+      toast(`Session added for ${entries.length} student${entries.length === 1 ? '' : 's'}`);
+      await loadSchedule(weekStart);
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+}
+
+async function deleteSession(sessionId, weekStart) {
+  if (!confirm('Remove this session from the schedule?')) return;
+  try {
+    await api(`/schedule/session/${sessionId}`, { method: 'DELETE' });
+    toast('Session removed');
+    await loadSchedule(weekStart);
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 async function loadSchedule(weekStart) {
   const body = document.getElementById('scheduleBody');
   try {
     const data = await api(`/schedule?week_start_date=${weekStart}`);
-    renderScheduleBody(body, data);
+    renderScheduleBody(body, data, weekStart);
   } catch (e) {
     toast(e.message, true);
   }
 }
 
-function renderScheduleBody(body, data) {
+function renderScheduleBody(body, data, weekStart) {
   if (!data.sessions || data.sessions.length === 0) {
-    body.innerHTML = emptyState('No schedule generated for this week', 'Click "Generate schedule" once your Paras have hours set and caseloads assigned.');
+    body.innerHTML = emptyState('No schedule generated for this week', 'Click "Generate schedule" once your Paras have hours set and caseloads assigned, or add a manual session above.');
     return;
   }
 
@@ -914,13 +1264,14 @@ function renderScheduleBody(body, data) {
     html += `<div class="card">
       <h3>Compliance flags</h3>
       <table>
-        <thead><tr><th>Student</th><th>Para</th><th>Scheduled / Required</th><th>Status</th></tr></thead>
+        <thead><tr><th>Student</th><th>Specialty</th><th>Para</th><th>Scheduled / Required</th><th>Status</th></tr></thead>
         <tbody>
           ${compliance
             .filter((c) => c.status !== 'met')
             .map(
               (c) => `<tr>
                 <td>${c.student_name}</td>
+                <td>${c.specialty ? `<span class="badge badge-group">${c.specialty}</span>` : '\u2014'}</td>
                 <td>${c.para_name}</td>
                 <td class="mono">${c.scheduled_minutes} / ${c.target_minutes} min</td>
                 <td><span class="badge badge-${c.status}">${c.status === 'partial' ? 'Partial' : 'Unmet'}</span></td>
@@ -929,7 +1280,7 @@ function renderScheduleBody(body, data) {
             .join('')}
         </tbody>
       </table>
-      <p class="field-hint" style="margin-top:12px;">Unmet minutes usually mean the Para doesn't have enough open weekly hours for this caseload. Add hours, rebalance the caseload, or allow shorter minimum session lengths.</p>
+      <p class="field-hint" style="margin-top:12px;">Unmet minutes usually mean the Para doesn't have enough open weekly hours for this caseload \u2014 or the student's own available windows don't leave enough room. Add hours, rebalance the caseload, adjust the student's available times, allow shorter minimum session lengths, or add a manual session above.</p>
     </div>`;
   }
 
@@ -949,9 +1300,11 @@ function renderScheduleBody(body, data) {
           return `<div class="para-day-cell">
             ${daySessions
               .map(
-                (s) => `<div class="session-chip ${s.service_type === 'group' ? 'group-chip' : ''}">
+                (s) => `<div class="session-chip ${s.service_type === 'group' ? 'group-chip' : ''}" style="position:relative;">
+                  <button data-del-session="${s.id}" title="Remove" style="position:absolute;top:3px;right:4px;background:none;border:none;color:var(--ink-soft);cursor:pointer;font-size:12px;line-height:1;padding:2px;">\u00d7</button>
                   <div class="chip-time">${s.start_time}–${s.end_time}</div>
                   <div class="chip-name">${s.student_name}</div>
+                  ${s.specialty ? `<div style="font-size:10px;color:var(--ink-soft);font-weight:700;">${s.specialty}</div>` : ''}
                 </div>`
               )
               .join('') || '<span style="color:var(--line);font-size:11px;">—</span>'}
@@ -963,6 +1316,9 @@ function renderScheduleBody(body, data) {
   </div>`;
 
   body.innerHTML = html;
+  body.querySelectorAll('[data-del-session]').forEach(
+    (b) => (b.onclick = () => deleteSession(b.dataset.delSession, weekStart))
+  );
 }
 
 // ---------- Admin Report ----------
@@ -1010,7 +1366,7 @@ function renderAdminTable(title, rows) {
   if (!rows || rows.length === 0) {
     return `<div class="card"><h3>${title}</h3><p style="color:var(--ink-soft);font-size:13px;">No caseload assignments yet.</p></div>`;
   }
-  const sorted = [...rows].sort((a, b) => a.student_name.localeCompare(b.student_name));
+  const sorted = [...rows].sort((a, b) => a.student_name.localeCompare(b.student_name) || (a.specialty || '').localeCompare(b.specialty || ''));
   return `
     <div class="card">
       <h3>${title}</h3>
@@ -1018,7 +1374,7 @@ function renderAdminTable(title, rows) {
       <table>
         <thead>
           <tr>
-            <th>Name</th><th>Grade</th><th>% of Weekly Goal</th><th>Total Weekly Minutes</th><th>Target Weekly Minutes</th>
+            <th>Name</th><th>Specialty</th><th>Grade</th><th>% of Weekly Goal</th><th>Total Weekly Minutes</th><th>Target Weekly Minutes</th>
             <th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th>
           </tr>
         </thead>
@@ -1029,6 +1385,7 @@ function renderAdminTable(title, rows) {
               return `
               <tr>
                 <td><strong>${r.student_name}</strong><div style="font-size:11px;color:var(--ink-soft);">${r.para_name}</div></td>
+                <td>${r.specialty ? `<span class="badge badge-group">${r.specialty}</span>` : '\u2014'}</td>
                 <td>${r.grade || '\u2014'}</td>
                 <td><span class="badge ${pctClass}">${r.pct_of_goal}%</span></td>
                 <td class="mono">${r.actual_minutes} min</td>

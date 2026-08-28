@@ -3,14 +3,14 @@ const db = require('../db');
 const { mondayOf } = require('../dateUtils');
 const router = express.Router();
 
-function weeklyTotal(orgId, studentId, paraId, weekStartDate) {
+function weeklyTotal(orgId, studentId, paraId, specialty, weekStartDate) {
   const row = db
     .prepare(
       `SELECT COALESCE(SUM(minutes), 0) AS total
        FROM time_logs
-       WHERE org_id = ? AND student_id = ? AND para_id = ? AND week_start_date = ? AND end_at IS NOT NULL`
+       WHERE org_id = ? AND student_id = ? AND para_id = ? AND specialty IS ? AND week_start_date = ? AND end_at IS NOT NULL`
     )
-    .get(orgId, studentId, paraId, weekStartDate);
+    .get(orgId, studentId, paraId, specialty, weekStartDate);
   return row.total;
 }
 
@@ -28,8 +28,8 @@ router.get('/running', (req, res) => {
   res.json(rows);
 });
 
-// Actual logged minutes per para/student pair for a given week, for comparison against
-// the assignment's weekly_minutes target.
+// Actual logged minutes per assignment (para + student + specialty) for a given week,
+// for comparison against the assignment's weekly_minutes target.
 router.get('/weekly-summary', (req, res) => {
   const weekStartDate = mondayOf(req.query.week_start_date);
   const assignments = db
@@ -48,25 +48,34 @@ router.get('/weekly-summary', (req, res) => {
     para_name: a.para_name,
     student_id: a.student_id,
     student_name: a.student_name,
+    specialty: a.specialty,
     target_minutes: a.weekly_minutes,
-    actual_minutes: weeklyTotal(req.user.org_id, a.student_id, a.para_id, weekStartDate),
+    actual_minutes: weeklyTotal(req.user.org_id, a.student_id, a.para_id, a.specialty, weekStartDate),
   }));
 
   res.json({ week_start_date: weekStartDate, summary });
 });
 
 router.post('/start', (req, res) => {
-  const { student_id, para_id } = req.body;
+  const { student_id, para_id, specialty } = req.body;
   if (!student_id || !para_id) return res.status(400).json({ error: 'student_id and para_id are required' });
 
   const student = db.prepare('SELECT id FROM students WHERE id = ? AND org_id = ?').get(student_id, req.user.org_id);
   const para = db.prepare('SELECT id FROM paras WHERE id = ? AND org_id = ?').get(para_id, req.user.org_id);
   if (!student || !para) return res.status(404).json({ error: 'Student or Para not found' });
 
+  // Scoped to the STUDENT, not the para+student pair — a student physically can't be in
+  // two sessions at once, so no clock should start for them while any other is running,
+  // regardless of which Para or specialty it's under.
   const alreadyRunning = db
-    .prepare('SELECT * FROM time_logs WHERE org_id = ? AND student_id = ? AND para_id = ? AND end_at IS NULL')
-    .get(req.user.org_id, student_id, para_id);
-  if (alreadyRunning) return res.status(409).json({ error: 'A clock is already running for this student', log: alreadyRunning });
+    .prepare('SELECT tl.*, p.name AS para_name FROM time_logs tl JOIN paras p ON p.id = tl.para_id WHERE tl.org_id = ? AND tl.student_id = ? AND tl.end_at IS NULL')
+    .get(req.user.org_id, student_id);
+  if (alreadyRunning) {
+    return res.status(409).json({
+      error: `This student already has a clock running with ${alreadyRunning.para_name}${alreadyRunning.specialty ? ' (' + alreadyRunning.specialty + ')' : ''}. Stop that one first \u2014 a student can't be in two sessions at once.`,
+      log: alreadyRunning,
+    });
+  }
 
   const now = new Date();
   const startAt = now.toISOString();
@@ -74,10 +83,10 @@ router.post('/start', (req, res) => {
 
   const info = db
     .prepare(
-      `INSERT INTO time_logs (org_id, student_id, para_id, week_start_date, start_at)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO time_logs (org_id, student_id, para_id, specialty, week_start_date, start_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
     )
-    .run(req.user.org_id, student_id, para_id, weekStartDate, startAt);
+    .run(req.user.org_id, student_id, para_id, specialty || null, weekStartDate, startAt);
 
   res.json(db.prepare('SELECT * FROM time_logs WHERE id = ?').get(info.lastInsertRowid));
 });
@@ -98,13 +107,13 @@ router.post('/:id/stop', (req, res) => {
 
   res.json({
     log: updated,
-    week_total_minutes: weeklyTotal(req.user.org_id, log.student_id, log.para_id, log.week_start_date),
+    week_total_minutes: weeklyTotal(req.user.org_id, log.student_id, log.para_id, log.specialty, log.week_start_date),
   });
 });
 
 // Manual correction/entry, e.g. logging a session that wasn't clocked live.
 router.post('/manual', (req, res) => {
-  const { student_id, para_id, minutes, date } = req.body;
+  const { student_id, para_id, specialty, minutes, date } = req.body;
   if (!student_id || !para_id || !minutes) {
     return res.status(400).json({ error: 'student_id, para_id, and minutes are required' });
   }
@@ -119,18 +128,28 @@ router.post('/manual', (req, res) => {
 
   const info = db
     .prepare(
-      `INSERT INTO time_logs (org_id, student_id, para_id, week_start_date, start_at, end_at, minutes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO time_logs (org_id, student_id, para_id, specialty, week_start_date, start_at, end_at, minutes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(req.user.org_id, student_id, para_id, weekStartDate, startAt.toISOString(), endAt.toISOString(), Number(minutes));
+    .run(
+      req.user.org_id,
+      student_id,
+      para_id,
+      specialty || null,
+      weekStartDate,
+      startAt.toISOString(),
+      endAt.toISOString(),
+      Number(minutes)
+    );
 
   res.json(db.prepare('SELECT * FROM time_logs WHERE id = ?').get(info.lastInsertRowid));
 });
 
-// Full weekly report for the Admin tab: one row per caseload assignment, with actual vs.
-// target minutes and a Mon–Fri breakdown of the actual session times logged that week.
-// Times are derived from the UTC portion of start_at/end_at (the app doesn't currently
-// store a per-org timezone), so they read as clock time on the server, not the browser.
+// Full weekly report for the Admin tab: one row per caseload assignment (para + student +
+// specialty), with actual vs. target minutes and a Mon–Fri breakdown of the actual session
+// times logged that week. Times are derived from the UTC portion of start_at/end_at (the
+// app doesn't currently store a per-org timezone), so they read as clock time on the
+// server, not the browser.
 function hm(iso) {
   const d = new Date(iso);
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
@@ -148,7 +167,7 @@ router.get('/admin-summary', (req, res) => {
        JOIN paras p ON p.id = a.para_id
        JOIN students s ON s.id = a.student_id
        WHERE a.org_id = ?
-       ORDER BY s.name`
+       ORDER BY s.name, a.specialty`
     )
     .all(req.user.org_id);
 
@@ -156,10 +175,10 @@ router.get('/admin-summary', (req, res) => {
     const logs = db
       .prepare(
         `SELECT start_at, end_at, minutes FROM time_logs
-         WHERE org_id = ? AND student_id = ? AND para_id = ? AND week_start_date = ? AND end_at IS NOT NULL
+         WHERE org_id = ? AND student_id = ? AND para_id = ? AND specialty IS ? AND week_start_date = ? AND end_at IS NOT NULL
          ORDER BY start_at`
       )
-      .all(req.user.org_id, a.student_id, a.para_id, weekStartDate);
+      .all(req.user.org_id, a.student_id, a.para_id, a.specialty, weekStartDate);
 
     const days = { mon: [], tue: [], wed: [], thu: [], fri: [] };
     let actualMinutes = 0;
@@ -180,6 +199,7 @@ router.get('/admin-summary', (req, res) => {
       para_name: a.para_name,
       student_id: a.student_id,
       student_name: a.student_name,
+      specialty: a.specialty,
       grade: a.grade,
       target_minutes: a.weekly_minutes,
       actual_minutes: actualMinutes,
