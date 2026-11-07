@@ -27,6 +27,17 @@ A sibling product to HourHive, built for special education / related-services sc
    - **Manual override**: click **+ Add manual session** to place one or more students into a specific Para/day/time slot yourself \u2014 e.g. combining two students into an ad-hoc joint session after the auto-run, or covering something the algorithm couldn't fit. The picker is scoped to that Para's actual caseload entries (student + specialty pairs) so minutes count toward the right target, and it's rejected with a clear error if it would double-book a student who already has an overlapping session with any Para. Every session chip (auto-generated or manual) has a small **\u00d7** to remove it; removing one half of a co-scheduled group removes the whole group's placement together. Compliance numbers recalculate live from whatever's actually in the schedule, not just from the last auto-run.
 9. **Admin Report** — a read-only rollup table for whole-team compliance review: Name, Specialty, Grade, % of Weekly Goal, Total Weekly Minutes, Target Weekly Minutes, then the actual clocked session times for Monday\u2013Friday, shown for **this week and last week** side by side. A student with multiple specialties gets one row per specialty. Pulled entirely from the `time_logs` actual-clock data, not the projected schedule \u2014 this is what you'd hand to a compliance reviewer.
 
+## Operations features (needs levels, master schedule, coverage)
+
+- **Student types:** every student is High, Middle or Low needs, with an optional **Medical high risk** flag, a **backup Para** and **coverage notes**. High = red, Middle = amber, Low = green everywhere (schedule chips, master schedule, coverage). Medical risk shows a red cross.
+- **Overview:** Paras employed, needs mix, per-Para workload (open minutes after break/lunch vs. minutes needed; group time counted once) and minutes allocated per student.
+- **Master Schedule:** day tabs, one time-positioned column per Para with work hours, break and lunch, sessions colored by need, plus a **Sped / Para not needed** column.
+- **Sped times:** per-student recurring blocks (Students > Sped Times). The scheduler treats them as busy and never places a Para session there.
+- **Half days / early release:** Calendar tab. Para hours are clipped to dismissal when the week is generated, so re-run Generate schedule after adding one.
+- **Para absences and coverage:** mark a Para out on the Calendar tab (date ranges skip weekends). The Coverage tab lists high-needs and medical students first, shows each one's backup Para, and offers only Paras who are working, off break/lunch and free at that time. Group sessions are covered together. Coverage is a date overlay, so the weekly schedule is not regenerated.
+- **Scheduler tie-break:** after priority, medical-risk and high-needs students get the earliest slots.
+- **CSV:** adds optional `Needs Level` and `Medical Risk` columns. Sped times, half days and absences are entered in the app.
+
 ## Run it locally
 
 ```bash
@@ -66,6 +77,8 @@ For each Para: build the week's free time blocks (work hours minus break/lunch),
 **Cross-Para double-booking prevention:** Paras are processed one at a time (not in parallel). The instant a Para's placements are finalized, every student involved has that time block marked "busy" in a shared map before the next Para is processed — so a student who needs both Speech (Para A) and OT (Para B) can never end up with two overlapping sessions, regardless of which Para's assignments were entered first. This is a real hard constraint, not a warning: the busy time is subtracted from the student's available windows the same way their own personal availability is, before any placement decision is made.
 
 This is a greedy heuristic, not a global optimizer — for realistic caseload sizes it reliably finds a full solution when one exists, and its compliance report tells you immediately when it doesn't (not enough Para hours, not enough overlap between the Para's hours and the student's own available windows, or the only free time was already claimed by a different specialty for that same student). Because Paras are processed sequentially, processing order can occasionally matter — a Para scheduled earlier can claim a slot that would have made a later Para's assignment easier to fully place. If you see an unexpected partial/unmet result, try regenerating after adjusting priority, or use the manual-session override to hand-place the remainder.
+
+Tables added for these features: `student_sped_blocks`, `special_days`, `para_absences`, `coverage_assignments`, plus `needs_level`, `medical_risk`, `backup_para_id`, `coverage_notes` on `students`.
 
 ## What's intentionally different from HourHive core
 

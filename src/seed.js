@@ -72,6 +72,21 @@ const students = [
 ];
 const studentIds = students.map(([name, grade, notes]) => insertStudent.run(orgId, name, grade, notes).lastInsertRowid);
 
+// Needs levels (high / middle / low), medical risk, backup Para, coverage notes, sped blocks
+const setNeeds = db.prepare('UPDATE students SET needs_level = ?, medical_risk = ?, backup_para_id = ?, coverage_notes = ? WHERE id = ?');
+setNeeds.run('high', 0, maria, null, studentIds[0]);
+setNeeds.run('low', 0, null, null, studentIds[1]);
+setNeeds.run('high', 1, maria, 'Seizure protocol \u2014 must have trained adult at all times. Rescue plan in nurse office.', studentIds[2]);
+setNeeds.run('middle', 0, null, null, studentIds[3]);
+setNeeds.run('middle', 0, null, null, studentIds[4]);
+setNeeds.run('middle', 0, null, null, studentIds[5]);
+setNeeds.run('low', 0, null, null, studentIds[6]);
+setNeeds.run('low', 0, null, null, studentIds[7]);
+setNeeds.run('middle', 0, null, null, studentIds[8]);
+// Mason is in his Sped classroom Mon-Fri 8:00-9:00 (no Para needed)
+const insertSped = db.prepare('INSERT INTO student_sped_blocks (student_id, day_of_week, start_time, end_time, label) VALUES (?, ?, ?, ?, ?)');
+for (let d = 1; d <= 5; d++) insertSped.run(studentIds[6], d, '08:00', '09:00', 'Sped classroom');
+
 // Ethan: Speech with James AND OT with Maria \u2014 the scheduler must never place these
 // two specialties at overlapping times since they're two different Paras.
 insertAssignment.run(orgId, james, studentIds[0], 'Speech', 150, 30, 15, '1:1', null, 1);

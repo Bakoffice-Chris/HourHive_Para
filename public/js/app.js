@@ -112,6 +112,9 @@ function setView(view) {
     students: 'Students',
     caseloads: 'Caseloads',
     schedule: 'Schedule',
+    master: 'Master Schedule',
+    calendar: 'Calendar: Half Days & Absences',
+    coverage: 'Coverage Plan',
     admin: 'Admin Report',
   };
   document.getElementById('viewTitle').textContent = titles[view];
@@ -161,34 +164,15 @@ function render() {
   const content = document.getElementById('content');
   content.innerHTML = '';
 
-  if (state.view === 'dashboard') renderDashboard(content, actions);
+  if (state.view === 'dashboard') renderDashboardOps(content, actions);
+  if (state.view === 'master') renderMaster(content, actions);
+  if (state.view === 'calendar') renderCalendar(content, actions);
+  if (state.view === 'coverage') renderCoverage(content, actions);
   if (state.view === 'paras') renderParas(content, actions);
   if (state.view === 'students') renderStudents(content, actions);
   if (state.view === 'caseloads') renderCaseloads(content, actions);
   if (state.view === 'schedule') renderSchedule(content, actions);
   if (state.view === 'admin') renderAdmin(content, actions);
-}
-
-// ---------- Dashboard ----------
-function renderDashboard(content, actions) {
-  const totalMinutesRequired = state.assignments.reduce((s, a) => s + a.weekly_minutes, 0);
-  content.innerHTML = `
-    <p class="section-intro">A quick read on caseload coverage across your Para Instructor team. Generate a weekly schedule from the Schedule tab to see compliance below.</p>
-    <div class="stat-grid">
-      <div class="stat-card"><div class="stat-value">${state.paras.length}</div><div class="stat-label">Para Instructors</div></div>
-      <div class="stat-card"><div class="stat-value">${state.students.length}</div><div class="stat-label">Students</div></div>
-      <div class="stat-card"><div class="stat-value">${state.assignments.length}</div><div class="stat-label">Caseload Assignments</div></div>
-      <div class="stat-card"><div class="stat-value">${totalMinutesRequired.toLocaleString()}</div><div class="stat-label">Required Minutes / Week</div></div>
-    </div>
-    <div class="card">
-      <h3>Getting started</h3>
-      <ol style="margin:0;padding-left:20px;font-size:13.5px;line-height:2;color:var(--ink);">
-        <li>Add your <strong>Para Instructors</strong> and set each one's weekly work hours, break, and lunch.</li>
-        <li>Add <strong>Students</strong> and build each Para's <strong>Caseload</strong> — assign students with their required weekly service minutes.</li>
-        <li>Go to <strong>Schedule</strong> and generate the week. The engine fills each Para's open time with student sessions until minute targets are met.</li>
-      </ol>
-    </div>
-  `;
 }
 
 // ---------- Paras ----------
@@ -210,7 +194,7 @@ function renderParas(content, actions) {
             .map(
               (p) => `
             <tr>
-              <td><span class="color-dot" style="background:${p.color}"></span>${p.name}</td>
+              <td><span class="color-dot" style="background:${p.color}"></span>${p.name}${p.active ? '' : ' <span class="badge badge-11">Inactive</span>'}</td>
               <td>${p.title || ''}</td>
               <td>${summarizeSpecialties(p.specialties)}</td>
               <td>${p.email || '—'}</td>
@@ -309,6 +293,7 @@ function openParaModal(para) {
       <div class="form-row"><label>Full name</label><input id="mName" value="${para?.name || ''}" placeholder="Maria Gonzalez" /></div>
       <div class="form-row"><label>Title</label><input id="mTitle" value="${para?.title || 'Para Instructor'}" /></div>
       <div class="form-row"><label>Email</label><input id="mEmail" value="${para?.email || ''}" placeholder="optional" /></div>
+      ${isEdit ? `<div class="form-row"><label>Status</label><select id="mActive"><option value="1" ${para.active ? 'selected' : ''}>Active (employed, scheduled)</option><option value="0" ${para.active ? '' : 'selected'}>Inactive (left / on leave, not scheduled)</option></select></div>` : ''}
       <div class="form-row"><label>Calendar color</label><input id="mColor" type="color" value="${para?.color || '#E3A008'}" style="height:38px;padding:4px;" /></div>
       <div class="modal-actions">
         <button class="btn btn-outline" id="cancelBtn">Cancel</button>
@@ -324,6 +309,7 @@ function openParaModal(para) {
       email: backdrop.querySelector('#mEmail').value.trim(),
       color: backdrop.querySelector('#mColor').value,
     };
+    if (isEdit) payload.active = backdrop.querySelector('#mActive').value === '1';
     if (!payload.name) return toast('Name is required', true);
     try {
       if (isEdit) await api(`/paras/${para.id}`, { method: 'PUT', body: JSON.stringify(payload) });
@@ -439,13 +425,14 @@ function renderStudents(content, actions) {
   content.innerHTML = `
     <div class="card">
       <table>
-        <thead><tr><th>Name</th><th>Grade</th><th>Specialty / Para</th><th>Weekly Target</th><th>Availability</th><th>Notes</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Needs</th><th>Grade</th><th>Specialty / Para</th><th>Weekly Target</th><th>Availability</th><th>Notes</th><th></th></tr></thead>
         <tbody>
           ${state.students
             .map(
               (s) => `
             <tr>
               <td>${s.name}</td>
+              <td>${needBadge(s)}</td>
               <td>${s.grade || '—'}</td>
               <td>${summarizeStudentAssignments(s.id)}</td>
               <td class="mono">${s.target_weekly_minutes ? s.target_weekly_minutes + ' min' : '—'}</td>
@@ -453,6 +440,7 @@ function renderStudents(content, actions) {
               <td style="color:var(--ink-soft)">${s.iep_notes || ''}</td>
               <td class="table-actions">
                 <button class="btn btn-outline btn-sm" data-avail="${s.id}">Availability</button>
+                <button class="btn btn-outline btn-sm" data-sped="${s.id}">Sped Times${s.sped_blocks && s.sped_blocks.length ? ' (' + s.sped_blocks.length + ')' : ''}</button>
                 <button class="btn btn-outline btn-sm" data-notes="${s.id}">Case Notes</button>
                 <button class="btn btn-outline btn-sm" data-edit="${s.id}">Edit</button>
                 <button class="btn-danger-text" data-del="${s.id}">Remove</button>
@@ -467,6 +455,7 @@ function renderStudents(content, actions) {
   content.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openStudentModal(findStudent(b.dataset.edit))));
   content.querySelectorAll('[data-notes]').forEach((b) => (b.onclick = () => openNotesModal(findStudent(b.dataset.notes))));
   content.querySelectorAll('[data-avail]').forEach((b) => (b.onclick = () => openStudentAvailabilityModal(findStudent(b.dataset.avail))));
+  content.querySelectorAll('[data-sped]').forEach((b) => (b.onclick = () => openSpedBlocksModal(findStudent(b.dataset.sped))));
   content.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => deleteStudent(b.dataset.del)));
 }
 
@@ -513,6 +502,23 @@ function openStudentModal(student) {
         <div class="field-hint">Used as the default when you assign this student to a Para's caseload \u2014 the actual scheduling target still lives on that caseload assignment (a student can have more than one).</div>
       </div>
       <div class="form-row"><label>Notes (optional)</label><textarea id="mNotes" rows="3" placeholder="Service notes, e.g. speech/language support">${student?.iep_notes || ''}</textarea></div>
+      <div class="form-row" style="border-top:1px solid var(--line);padding-top:14px;">
+        <label>Student type (needs level)</label>
+        <select id="mNeeds">
+          ${['high', 'middle', 'low'].map((l) => `<option value="${l}" ${((student?.needs_level || 'middle') === l) ? 'selected' : ''}>${l[0].toUpperCase() + l.slice(1)} needs</option>`).join('')}
+        </select>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-weight:600;">
+          <input type="checkbox" id="mMedical" ${student?.medical_risk ? 'checked' : ''} style="width:auto;" /> Medical high risk (must be covered first when their Para is out)
+        </label>
+      </div>
+      <div class="form-row">
+        <label>Backup Para (covers if their Para is out)</label>
+        <select id="mBackup">
+          <option value="">None chosen</option>
+          ${state.paras.filter((p) => p.active).map((p) => `<option value="${p.id}" ${String(student?.backup_para_id) === String(p.id) ? 'selected' : ''}>${p.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row"><label>Coverage notes</label><textarea id="mCoverNotes" rows="2" placeholder="e.g. Seizure protocol, needs trained adult at all times">${student?.coverage_notes || ''}</textarea></div>
       ${
         isEdit
           ? `<div class="form-row" style="border-top:1px solid var(--line);padding-top:14px;">
@@ -549,6 +555,10 @@ function openStudentModal(student) {
       grade: backdrop.querySelector('#mGrade').value.trim(),
       iep_notes: backdrop.querySelector('#mNotes').value.trim(),
       target_weekly_minutes: Number(backdrop.querySelector('#mTargetMinutes').value) || null,
+      needs_level: backdrop.querySelector('#mNeeds').value,
+      medical_risk: backdrop.querySelector('#mMedical').checked,
+      backup_para_id: Number(backdrop.querySelector('#mBackup').value) || null,
+      coverage_notes: backdrop.querySelector('#mCoverNotes').value.trim(),
     };
     if (!payload.name) return toast('Name is required', true);
     try {
@@ -1342,7 +1352,7 @@ function renderScheduleBody(body, data, weekStart) {
 
   const paraIds = [...new Set(data.sessions.map((s) => s.para_id))];
 
-  let html = `
+  let html = needLegend() + `
     <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:22px;">
       <div class="stat-card"><div class="stat-value">${met}</div><div class="stat-label">Students fully served</div></div>
       <div class="stat-card ${partial ? 'warn' : ''}"><div class="stat-value">${partial}</div><div class="stat-label">Partially served</div></div>
@@ -1390,10 +1400,10 @@ function renderScheduleBody(body, data, weekStart) {
           return `<div class="para-day-cell">
             ${daySessions
               .map(
-                (s) => `<div class="session-chip ${s.service_type === 'group' ? 'group-chip' : ''}" style="position:relative;">
+                (s) => `<div class="session-chip ${s.service_type === 'group' ? 'group-chip' : ''} need-${s.needs_level || 'middle'}" style="position:relative;">
                   <button data-del-session="${s.id}" title="Remove" style="position:absolute;top:3px;right:4px;background:none;border:none;color:var(--ink-soft);cursor:pointer;font-size:12px;line-height:1;padding:2px;">\u00d7</button>
                   <div class="chip-time">${s.start_time}–${s.end_time}</div>
-                  <div class="chip-name">${s.student_name}</div>
+                  <div class="chip-name">${s.medical_risk ? '<span class="med-cross" title="Medical high risk">\u271a</span> ' : ''}${s.student_name}</div>
                   ${s.specialty ? `<div style="font-size:10px;color:var(--ink-soft);font-weight:700;">${s.specialty}</div>` : ''}
                 </div>`
               )
