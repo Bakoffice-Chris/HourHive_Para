@@ -120,6 +120,51 @@ CREATE TABLE IF NOT EXISTS student_availability (
   end_time TEXT NOT NULL
 );
 
+-- Recurring blocks when a student is in Sped / a self-contained setting and no Para is needed.
+CREATE TABLE IF NOT EXISTS student_sped_blocks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  day_of_week INTEGER NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL,
+  label TEXT
+);
+
+-- Half days / early release days: Para windows are clipped to dismissal_time.
+CREATE TABLE IF NOT EXISTS special_days (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  org_id INTEGER NOT NULL REFERENCES organizations(id),
+  date TEXT NOT NULL,
+  day_type TEXT NOT NULL DEFAULT 'half_day',
+  label TEXT,
+  dismissal_time TEXT NOT NULL,
+  UNIQUE(org_id, date)
+);
+
+CREATE TABLE IF NOT EXISTS para_absences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  org_id INTEGER NOT NULL REFERENCES organizations(id),
+  para_id INTEGER NOT NULL REFERENCES paras(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  reason TEXT,
+  notes TEXT,
+  UNIQUE(para_id, date)
+);
+
+-- Date-based overlay: who covers an absent Para's session for a student.
+CREATE TABLE IF NOT EXISTS coverage_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  org_id INTEGER NOT NULL REFERENCES organizations(id),
+  date TEXT NOT NULL,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  specialty TEXT,
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL,
+  absent_para_id INTEGER NOT NULL REFERENCES paras(id) ON DELETE CASCADE,
+  cover_para_id INTEGER NOT NULL REFERENCES paras(id) ON DELETE CASCADE,
+  UNIQUE(org_id, date, student_id, start_time)
+);
+
 CREATE TABLE IF NOT EXISTS schedule_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   org_id INTEGER NOT NULL REFERENCES organizations(id),
@@ -190,6 +235,15 @@ if (!assignmentCols.includes('specialty')) {
       SELECT id, org_id, para_id, student_id, weekly_minutes, session_length, min_session_length, service_type, group_tag, priority, created_at FROM assignments_old;
     DROP TABLE assignments_old;
   `);
+}
+
+for (const [col, ddl] of [
+  ['needs_level', "ALTER TABLE students ADD COLUMN needs_level TEXT DEFAULT 'middle'"],
+  ['medical_risk', 'ALTER TABLE students ADD COLUMN medical_risk INTEGER DEFAULT 0'],
+  ['backup_para_id', 'ALTER TABLE students ADD COLUMN backup_para_id INTEGER'],
+  ['coverage_notes', 'ALTER TABLE students ADD COLUMN coverage_notes TEXT'],
+]) {
+  if (!studentCols.includes(col)) db.exec(ddl);
 }
 
 const scheduleSessionCols = db.prepare("PRAGMA table_info(schedule_sessions)").all().map((c) => c.name);

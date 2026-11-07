@@ -7,6 +7,8 @@
 // processed one at a time and each one's placements immediately become "busy" time
 // blocking every subsequently-processed Para from double-booking that student.
 
+const { dateForDow, dowOfISO } = require('../dateUtils');
+
 function parseTime(hhmm) {
   const [h, m] = hhmm.split(':').map(Number);
   return h * 60 + m;
@@ -143,7 +145,7 @@ function effectiveUnitWindowsForDay(unit, day, availabilityIndex, busyMap) {
 // Build demand units (individual or grouped-by-group_tag) for one Para's caseload.
 // Each unit tracks which specialty each student's need belongs to, so generated
 // sessions and compliance can be attributed to the right assignment.
-function buildDemandUnits(assignments) {
+function buildDemandUnits(assignments, needsRankByStudent = {}) {
   const units = [];
   const groups = new Map();
 
@@ -158,6 +160,7 @@ function buildDemandUnits(assignments) {
           sessionLength: 0,
           minSessionLength: Infinity,
           priority: 5,
+          needsRank: 9,
           remaining: {},
           target: {},
           specialtyByStudent: {},
@@ -168,6 +171,7 @@ function buildDemandUnits(assignments) {
       g.sessionLength = Math.max(g.sessionLength, a.session_length);
       g.minSessionLength = Math.min(g.minSessionLength, a.min_session_length);
       g.priority = Math.min(g.priority, a.priority);
+      g.needsRank = Math.min(g.needsRank, needsRankByStudent[a.student_id] ?? 2);
       g.remaining[a.student_id] = a.weekly_minutes;
       g.target[a.student_id] = a.weekly_minutes;
       g.specialtyByStudent[a.student_id] = a.specialty;
@@ -179,6 +183,7 @@ function buildDemandUnits(assignments) {
         sessionLength: a.session_length,
         minSessionLength: a.min_session_length,
         priority: a.priority,
+        needsRank: needsRankByStudent[a.student_id] ?? 2,
         remaining: { [a.student_id]: a.weekly_minutes },
         target: { [a.student_id]: a.weekly_minutes },
         specialtyByStudent: { [a.student_id]: a.specialty },
@@ -256,6 +261,7 @@ function schedulePara(freeWindows, units, availabilityIndex, busyMap) {
         const bToday = scheduledToday[b.u.key] === win.day ? 1 : 0;
         if (aToday !== bToday) return aToday - bToday; // prefer not-yet-scheduled-today
         if (a.u.priority !== b.u.priority) return a.u.priority - b.u.priority; // lower number = higher priority
+        if (a.u.needsRank !== b.u.needsRank) return a.u.needsRank - b.u.needsRank; // medical-risk / high needs first
         return unitRemainingMax(b.u) - unitRemainingMax(a.u); // more remaining need first
       });
 
@@ -331,11 +337,32 @@ function generateSchedule(db, orgId, weekStartDate) {
   // next Para processed can never double-book a student who's already been placed.
   const busyMap = {};
 
+  // Sped / self-contained blocks: the student is unavailable for Para service then.
+  const spedRows = studentIds.length === 0 ? [] : db
+    .prepare(`SELECT * FROM student_sped_blocks WHERE student_id IN (${studentIds.map(() => '?').join(',')})`)
+    .all(...studentIds);
+  for (const b of spedRows) markBusy(busyMap, b.student_id, b.day_of_week, parseTime(b.start_time), parseTime(b.end_time));
+
+  // Half days / early release: clip every Para's windows to dismissal on that weekday.
+  const dismissalByDow = {};
+  for (const sd of db.prepare('SELECT * FROM special_days WHERE org_id = ?').all(orgId)) {
+    const dow = dowOfISO(sd.date);
+    if (dateForDow(weekStartDate, dow) === sd.date) dismissalByDow[dow] = parseTime(sd.dismissal_time);
+  }
+
+  const needsRankByStudent = {};
+  for (const st of db.prepare('SELECT id, needs_level, medical_risk FROM students WHERE org_id = ?').all(orgId)) {
+    needsRankByStudent[st.id] = st.medical_risk ? 0 : ({ high: 1, middle: 2, low: 3 }[st.needs_level] ?? 2);
+  }
+
   for (const para of paras) {
     const availRows = db
       .prepare('SELECT * FROM para_availability WHERE para_id = ?')
       .all(para.id);
-    const freeWindows = availRows.flatMap(buildFreeWindows);
+    const freeWindows = availRows.flatMap(buildFreeWindows).map((w) => {
+      const cut = dismissalByDow[w.day];
+      return cut == null ? w : { ...w, end: Math.min(w.end, cut) };
+    }).filter((w) => w.end - w.start > 0);
 
     const assignments = db
       .prepare('SELECT * FROM assignments WHERE para_id = ?')
@@ -343,7 +370,7 @@ function generateSchedule(db, orgId, weekStartDate) {
 
     if (assignments.length === 0) continue;
 
-    const units = buildDemandUnits(assignments);
+    const units = buildDemandUnits(assignments, needsRankByStudent);
     const placements = scheduleParaSafe(freeWindows, units, availabilityIndex, busyMap);
 
     const rowsToInsert = [];

@@ -25,6 +25,10 @@ const AVAIL_DAY_HEADERS = ['available day', 'availability day', 'avail day', 'fr
 const AVAIL_START_HEADERS = ['available start', 'availability start', 'avail start', 'free start', 'start time'];
 const AVAIL_END_HEADERS = ['available end', 'availability end', 'avail end', 'free end', 'end time'];
 
+const NEEDS_HEADERS = ['needs level', 'needs', 'need level', 'student type'];
+const MEDICAL_HEADERS = ['medical risk', 'medical', 'high risk'];
+const NEEDS_LEVELS = ['high', 'middle', 'low'];
+
 const SPECIALTY_LOOKUP = new Map(SPECIALTIES.map((s) => [s.toLowerCase(), s]));
 
 const DAY_NAME_TO_NUM = {
@@ -61,16 +65,19 @@ router.get('/', (req, res) => {
     .prepare('SELECT * FROM students WHERE org_id = ? ORDER BY name')
     .all(req.user.org_id);
   const availStmt = db.prepare('SELECT * FROM student_availability WHERE student_id = ? ORDER BY day_of_week, start_time');
-  const withAvail = students.map((s) => ({ ...s, availability: availStmt.all(s.id) }));
+  const spedStmt = db.prepare('SELECT * FROM student_sped_blocks WHERE student_id = ? ORDER BY day_of_week, start_time');
+  const withAvail = students.map((s) => ({ ...s, availability: availStmt.all(s.id), sped_blocks: spedStmt.all(s.id) }));
   res.json(withAvail);
 });
 
 router.post('/', (req, res) => {
-  const { name, grade, iep_notes, target_weekly_minutes } = req.body;
+  const { name, grade, iep_notes, target_weekly_minutes, needs_level, medical_risk, backup_para_id, coverage_notes } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
+  if (needs_level && !NEEDS_LEVELS.includes(needs_level)) return res.status(400).json({ error: 'needs_level must be high, middle or low' });
   const info = db
-    .prepare('INSERT INTO students (org_id, name, grade, iep_notes, target_weekly_minutes) VALUES (?, ?, ?, ?, ?)')
-    .run(req.user.org_id, name, grade || null, iep_notes || null, target_weekly_minutes || null);
+    .prepare('INSERT INTO students (org_id, name, grade, iep_notes, target_weekly_minutes, needs_level, medical_risk, backup_para_id, coverage_notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(req.user.org_id, name, grade || null, iep_notes || null, target_weekly_minutes || null,
+      needs_level || 'middle', medical_risk ? 1 : 0, backup_para_id || null, coverage_notes || null);
   res.json(db.prepare('SELECT * FROM students WHERE id = ?').get(info.lastInsertRowid));
 });
 
@@ -79,15 +86,20 @@ router.put('/:id', (req, res) => {
     .prepare('SELECT * FROM students WHERE id = ? AND org_id = ?')
     .get(req.params.id, req.user.org_id);
   if (!student) return res.status(404).json({ error: 'Student not found' });
-  const { name, grade, iep_notes, active, target_weekly_minutes } = req.body;
+  const { name, grade, iep_notes, active, target_weekly_minutes, needs_level, medical_risk, backup_para_id, coverage_notes } = req.body;
+  if (needs_level !== undefined && !NEEDS_LEVELS.includes(needs_level)) return res.status(400).json({ error: 'needs_level must be high, middle or low' });
   db.prepare(
-    'UPDATE students SET name = ?, grade = ?, iep_notes = ?, active = ?, target_weekly_minutes = ? WHERE id = ?'
+    'UPDATE students SET name = ?, grade = ?, iep_notes = ?, active = ?, target_weekly_minutes = ?, needs_level = ?, medical_risk = ?, backup_para_id = ?, coverage_notes = ? WHERE id = ?'
   ).run(
     name ?? student.name,
     grade ?? student.grade,
     iep_notes ?? student.iep_notes,
     active === undefined ? student.active : active ? 1 : 0,
     target_weekly_minutes === undefined ? student.target_weekly_minutes : target_weekly_minutes || null,
+    needs_level === undefined ? student.needs_level : needs_level,
+    medical_risk === undefined ? student.medical_risk : medical_risk ? 1 : 0,
+    backup_para_id === undefined ? student.backup_para_id : backup_para_id || null,
+    coverage_notes === undefined ? student.coverage_notes : coverage_notes || null,
     student.id
   );
   res.json(db.prepare('SELECT * FROM students WHERE id = ?').get(student.id));
@@ -134,6 +146,29 @@ router.put('/:id/availability', (req, res) => {
   res.json({ ...student, availability });
 });
 
+// Recurring blocks when the student is in Sped / a self-contained setting (no Para needed).
+// The scheduler treats these as busy time. body: { blocks: [{ day_of_week, start_time, end_time, label }] }
+router.put('/:id/sped-blocks', (req, res) => {
+  const student = db
+    .prepare('SELECT * FROM students WHERE id = ? AND org_id = ?')
+    .get(req.params.id, req.user.org_id);
+  if (!student) return res.status(404).json({ error: 'Student not found' });
+  const { blocks } = req.body;
+  if (!Array.isArray(blocks)) return res.status(400).json({ error: 'blocks array is required' });
+  for (const b of blocks) {
+    if (!b.start_time || !b.end_time || b.end_time <= b.start_time) {
+      return res.status(400).json({ error: 'Each block needs a start time before its end time' });
+    }
+  }
+  const del = db.prepare('DELETE FROM student_sped_blocks WHERE student_id = ?');
+  const ins = db.prepare('INSERT INTO student_sped_blocks (student_id, day_of_week, start_time, end_time, label) VALUES (?, ?, ?, ?, ?)');
+  db.transaction(() => {
+    del.run(student.id);
+    for (const b of blocks) ins.run(student.id, b.day_of_week, b.start_time, b.end_time, b.label || null);
+  })();
+  res.json({ ...student, sped_blocks: db.prepare('SELECT * FROM student_sped_blocks WHERE student_id = ? ORDER BY day_of_week, start_time').all(student.id) });
+});
+
 // ---------- Case notes (timestamped log, separate from the short student.iep_notes field) ----------
 
 router.get('/:id/notes', (req, res) => {
@@ -175,14 +210,14 @@ router.delete('/:id/notes/:noteId', (req, res) => {
 // the same name.
 router.get('/import/template', (req, res) => {
   const csv =
-    'Name,Grade,Notes,Specialty,Weekly Minutes,Para,Session Length,Min Session Length,Service Type,Group Tag,Priority,Available Day,Available Start,Available End\n' +
-    'Ethan Brooks,3rd,"Speech/language support, works well 1:1",Speech,150,James Whitfield,30,15,1:1,,1,Monday,08:00,08:45\n' +
-    'Ethan Brooks,3rd,,OT,60,Maria Gonzalez,20,15,1:1,,2,Tuesday,08:00,08:45\n' +
-    'Ethan Brooks,3rd,,,,,,,,,,Wednesday,08:00,08:45\n' +
-    'Ava Nguyen,4th,Reading fluency support,Reading,120,Maria Gonzalez,30,20,1:1,,2,,,\n' +
-    'Sofia Ramirez,5th,Reading intervention,Reading,90,Maria Gonzalez,30,15,group,reading-grp-1,3,,,\n' +
-    'Noah Patel,3rd,Reading intervention,Reading,90,Maria Gonzalez,30,15,group,reading-grp-1,3,,,\n' +
-    'Isabella Kim,1st,,,,,,,,,,,,\n';
+    'Name,Grade,Notes,Specialty,Weekly Minutes,Para,Session Length,Min Session Length,Service Type,Group Tag,Priority,Available Day,Available Start,Available End,Needs Level,Medical Risk\n' +
+    'Ethan Brooks,3rd,"Speech/language support, works well 1:1",Speech,150,James Whitfield,30,15,1:1,,1,Monday,08:00,08:45,High,Yes\n' +
+    'Ethan Brooks,3rd,,OT,60,Maria Gonzalez,20,15,1:1,,2,Tuesday,08:00,08:45,,\n' +
+    'Ethan Brooks,3rd,,,,,,,,,,Wednesday,08:00,08:45,,\n' +
+    'Ava Nguyen,4th,Reading fluency support,Reading,120,Maria Gonzalez,30,20,1:1,,2,,,,Low,\n' +
+    'Sofia Ramirez,5th,Reading intervention,Reading,90,Maria Gonzalez,30,15,group,reading-grp-1,3,,,,Middle,\n' +
+    'Noah Patel,3rd,Reading intervention,Reading,90,Maria Gonzalez,30,15,group,reading-grp-1,3,,,,Middle,\n' +
+    'Isabella Kim,1st,,,,,,,,,,,,,,\n';
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="students-template.csv"');
   res.send(csv);
@@ -211,6 +246,8 @@ router.post('/import', upload.single('file'), (req, res) => {
   const availDayIdx = col(AVAIL_DAY_HEADERS);
   const availStartIdx = col(AVAIL_START_HEADERS);
   const availEndIdx = col(AVAIL_END_HEADERS);
+  const needsIdx = col(NEEDS_HEADERS);
+  const medicalIdx = col(MEDICAL_HEADERS);
 
   if (nameIdx === -1) {
     return res.status(400).json({
@@ -381,6 +418,19 @@ router.post('/import', upload.single('file'), (req, res) => {
     availabilityWindowsAdded++;
   }
 
+  const setNeeds = db.prepare('UPDATE students SET needs_level = ? WHERE id = ?');
+  const setMedical = db.prepare('UPDATE students SET medical_risk = ? WHERE id = ?');
+  function processNeedsCell(r, i, name, studentId) {
+    const needsRaw = cell(r, needsIdx).toLowerCase();
+    if (needsRaw) {
+      const level = needsRaw.replace(/\s*needs?$/, '');
+      if (NEEDS_LEVELS.includes(level)) setNeeds.run(level, studentId);
+      else rowErrors.push({ row: i + 1, error: `Unknown Needs Level "${needsRaw}" for ${name}. Use High, Middle or Low.` });
+    }
+    const medRaw = cell(r, medicalIdx).toLowerCase();
+    if (medRaw) setMedical.run(['yes', 'y', 'true', '1', 'x'].includes(medRaw) ? 1 : 0, studentId);
+  }
+
   const tx = db.transaction(() => {
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
@@ -404,6 +454,7 @@ router.post('/import', upload.single('file'), (req, res) => {
       // already seen in this import (or already on the roster) — expected in the long
       // format, not an error.
 
+      processNeedsCell(r, i, name, studentId);
       processSpecialtyCell(r, i, name, studentId);
       processAvailabilityCell(r, i, name, studentId);
     }

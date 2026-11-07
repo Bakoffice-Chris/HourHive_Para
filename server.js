@@ -22,6 +22,8 @@ app.use('/api/students', requireAuth, studentRoutes);
 app.use('/api/assignments', requireAuth, assignmentRoutes);
 app.use('/api/schedule', requireAuth, scheduleRoutes);
 app.use('/api/time-logs', requireAuth, timeLogRoutes);
+app.use('/api/calendar', requireAuth, require('./src/routes/calendar'));
+app.use('/api/coverage', requireAuth, require('./src/routes/coverage'));
 
 app.get('/api/specialties', requireAuth, (req, res) => res.json({ specialties: SPECIALTIES }));
 app.get('/api/health', (req, res) => res.json({ ok: true, product: 'HourHive Caseload' }));

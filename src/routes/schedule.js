@@ -1,7 +1,7 @@
 const express = require('express');
 const db = require('../db');
 const { generateSchedule } = require('../scheduler/generate');
-const { mondayOf } = require('../dateUtils');
+const { mondayOf, addDaysISO } = require('../dateUtils');
 const router = express.Router();
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -61,7 +61,7 @@ router.get('/', (req, res) => {
   const weekStartDate = mondayOf(req.query.week_start_date);
   const sessions = db
     .prepare(
-      `SELECT ss.*, p.name AS para_name, p.color AS para_color, s.name AS student_name
+      `SELECT ss.*, p.name AS para_name, p.color AS para_color, s.name AS student_name, s.needs_level, s.medical_risk
        FROM schedule_sessions ss
        JOIN paras p ON p.id = ss.para_id
        JOIN students s ON s.id = ss.student_id
@@ -70,8 +70,18 @@ router.get('/', (req, res) => {
     )
     .all(req.user.org_id, weekStartDate);
 
+  const weekEnd = addDaysISO(weekStartDate, 6);
+  const special_days = db.prepare('SELECT * FROM special_days WHERE org_id = ? AND date BETWEEN ? AND ?').all(req.user.org_id, weekStartDate, weekEnd);
+  const absences = db
+    .prepare(`SELECT a.*, p.name AS para_name FROM para_absences a JOIN paras p ON p.id = a.para_id WHERE a.org_id = ? AND a.date BETWEEN ? AND ?`)
+    .all(req.user.org_id, weekStartDate, weekEnd);
+  const coverage = db.prepare('SELECT * FROM coverage_assignments WHERE org_id = ? AND date BETWEEN ? AND ?').all(req.user.org_id, weekStartDate, weekEnd);
+
   res.json({
     week_start_date: weekStartDate,
+    special_days,
+    absences,
+    coverage,
     sessions,
     compliance: computeCompliance(req.user.org_id, weekStartDate),
   });
